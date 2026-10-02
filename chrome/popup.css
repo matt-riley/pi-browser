@@ -1,0 +1,18 @@
+:root { color-scheme: light dark; font: 14px system-ui, sans-serif; }
+body { width: 340px; padding: 16px; margin: 0; }
+h1 { font-size: 20px; margin-top: 0; }
+h2 { font-size: 16px; margin-bottom: 4px; }
+label { display: block; margin-top: 10px; }
+input, button { box-sizing: border-box; width: 100%; padding: 9px; margin-top: 6px; font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: default; }
+.danger { border: 2px solid #b42318; }
+.note { font-size: 12px; line-height: 1.5; }
+#status, #tab { overflow-wrap: anywhere; }
+section { border-top: 1px solid #7778; margin-top: 16px; padding-top: 10px; }
+fieldset { border: 0; margin: 8px 0 0; padding: 0; }
+fieldset label { display: block; }
+fieldset input { width: auto; margin-right: 6px; }
+#policies { padding-left: 20px; }
+#policies li { margin: 8px 0; overflow-wrap: anywhere; }
+#policies button { width: auto; padding: 4px 8px; margin-left: 4px; }

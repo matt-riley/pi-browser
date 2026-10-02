@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Pi Browser",
+  "version": "0.1.0",
+  "description": "Share individual tabs with Pi for DOM-first, Jev-guided navigation.",
+  "minimum_chrome_version": "116",
+  "permissions": ["activeTab", "alarms", "scripting", "storage", "tabs"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_popup": "popup.html", "default_title": "Pi Browser — share or stop" },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; connect-src ws://127.0.0.1:*"
+  }
+}

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pi Browser</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <h1>Pi Browser</h1>
+  <p id="status" role="status" aria-live="polite">Checking connection…</p>
+  <form id="pairing">
+    <label for="port">Port from <code>/browser</code></label>
+    <input id="port" type="number" min="1" max="65535" required>
+    <label for="token">Pairing token</label>
+    <input id="token" type="password" minlength="64" maxlength="64" required autocomplete="off" spellcheck="false">
+    <button type="submit">Pair with Pi</button>
+  </form>
+  <p id="tab"></p>
+  <button id="share" disabled>Share this tab</button>
+  <button id="revoke" disabled>Stop sharing this tab</button>
+
+  <section aria-labelledby="policy-heading">
+    <h2 id="policy-heading">Allowed sites</h2>
+    <p class="note">Add an exact origin once. Pi can then browse it without sharing individual tabs.</p>
+    <form id="policy-form">
+      <label for="origin">Origin</label>
+      <input id="origin" type="url" placeholder="https://www.example.com" required>
+      <fieldset>
+        <legend>Actions</legend>
+        <label><input id="policy-read" type="checkbox" checked> Read</label>
+        <label><input id="policy-navigate" type="checkbox"> Open and navigate</label>
+        <label><input id="policy-click" type="checkbox"> Click eligible links without prompting</label>
+      </fieldset>
+      <button type="submit">Allow site</button>
+    </form>
+    <ul id="policies"></ul>
+  </section>
+
+  <button id="stop" class="danger">Disconnect &amp; stop all</button>
+  <p class="note">Persistent pairing and autonomous clicks are local permissions. Remove a site here or use <code>/browser stop</code> to revoke them.</p>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
