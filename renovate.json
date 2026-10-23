@@ -2,6 +2,7 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "local>matt-riley/renovate-config",
-    "local>matt-riley/renovate-config:schedule-tuesday"
+    "local>matt-riley/renovate-config:schedule-tuesday",
+    "github>matt-riley/renovate-config:no-automerge"
   ]
 }
