@@ -177,7 +177,7 @@ export class Bridge {
     return [{ id: this.session, label: this.label }, ...this.sessions.values()];
   }
 
-  // Chrome learns which sessions exist so it can keep each session's tabs apart.
+  // Chrome learns which sessions exist so the popup can show them.
   tellChrome() { send(this.peer, { type: 'sessions', sessions: this.sessionList() }); }
   tellSessions() {
     for (const ws of this.sessions.keys()) send(ws, { type: 'browser', connected: this.peer !== null });
@@ -234,9 +234,7 @@ export class Bridge {
             return true;
           }
           this.routes.set(id, ws);
-          // The hub stamps the session, so one session cannot speak for another.
-          send(this.peer, { type: 'command', id, op: message.op, args: message.args,
-            expiresAt: message.expiresAt, session: this.sessions.get(ws).id });
+          send(this.peer, { type: 'command', id, op: message.op, args: message.args, expiresAt: message.expiresAt });
           return true;
         }
         if (message?.type === 'cancel' && typeof message.id === 'string') {
@@ -244,11 +242,6 @@ export class Bridge {
             this.routes.delete(message.id);
             send(this.peer, { type: 'cancel', id: message.id });
           }
-          return true;
-        }
-        if (message?.type === 'revoke') {
-          send(this.peer, { type: 'revoke' });
-          this.peer?.close(1000, 'revoked');
           return true;
         }
         if (message?.type === 'reset') {
@@ -365,8 +358,7 @@ export class Bridge {
         reject: (error) => finish(reject, error),
       });
       signal?.addEventListener('abort', abort, { once: true });
-      target.send(JSON.stringify({ type: 'command', id, op, args, expiresAt: Date.now() + timeout,
-        ...(this.mode === 'hub' ? { session: this.session } : {}) }));
+      target.send(JSON.stringify({ type: 'command', id, op, args, expiresAt: Date.now() + timeout }));
     });
   }
 
@@ -374,6 +366,8 @@ export class Bridge {
     for (const pending of [...this.pending.values()]) pending.reject(new Error(reason));
   }
 
+  // Returns true when Chrome was told to forget its pairing. /browser stop does that
+  // only in the last session; otherwise just this session leaves.
   async close({ revoke = false } = {}) {
     this.running = false;
     this.epoch++;
@@ -384,17 +378,18 @@ export class Bridge {
       this.hub = null;
       this.mode = undefined;
       this.browserConnected = false;
-      if (revoke) send(hub, { type: 'revoke' }); // The hub tells Chrome to forget pairing.
       this.rejectPending('Browser bridge stopped');
       hub?.close(1000);
       this.pairing = undefined;
       this.token = undefined;
-      return;
+      return false;
     }
-    if (!this.server) return;
+    if (!this.server) return false;
     this.rejectPending('Browser bridge stopped');
+    // With other sessions joined, Chrome stays paired and reconnects to whichever takes over.
+    const revoked = revoke && this.sessions.size === 0;
     for (const ws of this.sockets) {
-      if (revoke && !this.sessions.has(ws) && ws.readyState === WebSocket.OPEN) {
+      if (revoked && !this.sessions.has(ws) && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'revoke' }));
         ws.close(1000, 'revoked');
       } else ws.terminate(); // Joined sessions see the close and one takes the port over.
@@ -412,6 +407,7 @@ export class Bridge {
     this.wss = undefined;
     this.pairing = undefined;
     this.token = undefined;
+    return revoked;
   }
 
   async reset() {

@@ -4,18 +4,15 @@ let heartbeat;
 let reconnectTimer;
 let reconnectDelay = 1000;
 let pairingProfile = null;
-// tabId -> { origin, id, policy, session }. session is the Pi session that owns
-// the tab (shared to it or opened by it), or null for a tab any session may use
-// under a site policy.
+// tabId -> { origin, id }. Only tabs the user shares from the popup are usable,
+// and every connected Pi session may use every shared tab.
 const shared = new Map();
-// Pi sessions connected through the bridge, as announced by the port owner.
+// Pi sessions connected through the bridge, as announced by the port owner. Shown in the popup.
 let sessions = [];
-const policies = new Map();
 const queues = new Map();
 const requests = new Map();
 let controls = Promise.resolve();
 let controlEpoch = 0;
-const ACTIONS = new Set(['read', 'navigate', 'click']);
 const TOKEN = /^[a-f0-9]{64}$/;
 const SESSION = /^[A-Za-z0-9-]{1,100}$/;
 const RECONNECT_ALARM = 'pi-browser-reconnect';
@@ -31,38 +28,14 @@ function forgetPairing() {
   void chrome.alarms.clear(RECONNECT_ALARM);
   disconnect();
 }
-const status = () => ({ connected, paired: Boolean(pairingProfile), shares: [...shared.keys()], policies: policyList(),
-  sessions: sessions.map((session) => ({ ...session })),
-  shareSessions: [...shared].filter(([, grant]) => grant.session).map(([tabId, grant]) => ({ tabId, session: grant.session })) });
+const status = () => ({ connected, paired: Boolean(pairingProfile), shares: [...shared.keys()],
+  sessions: sessions.map((session) => ({ ...session })) });
 const validSessions = (list) => (Array.isArray(list) ? list.slice(0, 32) : [])
   .filter((item) => SESSION.test(item?.id ?? '') && typeof item.label === 'string')
   .map(({ id, label }) => ({ id, label: label.slice(0, 100) }));
-function setSessions(list) {
-  sessions = validSessions(list);
-  const live = new Set(sessions.map((session) => session.id));
-  // A session that left loses its shares and the tabs it opened.
-  for (const [tabId, grant] of [...shared]) if (grant.session && !live.has(grant.session)) dropTab(tabId);
-}
 
 const badge = (tabId, text) => chrome.action.setBadgeText({ tabId, text }).catch(() => {});
 const persist = () => chrome.storage.session.set({ shares: [...shared.keys()] });
-const policyOrigin = (value) => {
-  let url;
-  try { url = new URL(value); } catch { throw new Error('Policy origin must be an HTTP(S) origin'); }
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) {
-    throw new Error('Policy origin must be an HTTP(S) origin without a path or credentials');
-  }
-  return url.origin;
-};
-const permissionOrigin = (origin) => `${origin}/*`;
-const policyRecord = (origin, actions) => {
-  const normalizedOrigin = policyOrigin(origin);
-  if (!Array.isArray(actions) || !actions.length || actions.some((action) => !ACTIONS.has(action)) ||
-      !actions.includes('read')) throw new Error('Policy actions must include read and use only read, navigate or click');
-  return { origin: normalizedOrigin, actions: [...new Set(actions)].sort() };
-};
-const policyList = () => [...policies.entries()].map(([origin, actions]) => ({ origin, actions: [...actions].sort() }));
-const allows = (origin, action) => policies.get(origin)?.has(action) === true;
 
 function dropTab(tabId) {
   shared.delete(tabId); // Revoke synchronously before awaiting Chrome APIs.
@@ -73,7 +46,9 @@ function dropTab(tabId) {
 function cancelRequests() {
   for (const request of requests.values()) request.cancelled = true;
 }
-function disconnect({ reconnect = false } = {}) {
+// Shares outlast a lost Pi connection that will reconnect, for example when the hub's
+// session exits and another takes the port over. Stopping or re-pairing drops them.
+function disconnect({ reconnect = false, keepShares = false } = {}) {
   controlEpoch++;
   connected = false;
   clearInterval(heartbeat);
@@ -82,7 +57,7 @@ function disconnect({ reconnect = false } = {}) {
   const old = socket;
   socket = null;
   sessions = [];
-  for (const id of [...shared.keys()]) dropTab(id);
+  if (!keepShares) for (const id of [...shared.keys()]) dropTab(id);
   cancelRequests();
   old?.close();
   if (reconnect) scheduleReconnect();
@@ -94,7 +69,7 @@ function socketClosed(ws, shouldReconnect) {
   clearInterval(heartbeat);
   socket = null;
   sessions = [];
-  for (const id of [...shared.keys()]) dropTab(id);
+  if (!shouldReconnect) for (const id of [...shared.keys()]) dropTab(id);
   cancelRequests();
   if (shouldReconnect) scheduleReconnect();
 }
@@ -114,7 +89,7 @@ async function pair(port, token, { automatic = false } = {}) {
   if (!Number.isInteger(port) || port < 1 || port > 65535 || !TOKEN.test(token ?? '')) {
     throw new Error('Enter the port and 64-character token shown by /browser');
   }
-  disconnect();
+  disconnect({ keepShares: automatic });
   const ws = new WebSocket(`ws://127.0.0.1:${port}/browser`);
   socket = ws;
   await new Promise((resolve, reject) => {
@@ -134,7 +109,7 @@ async function pair(port, token, { automatic = false } = {}) {
         sessions = validSessions(message.sessions);
         clearTimeout(timer);
         heartbeat = setInterval(() => {
-          if (Date.now() - lastPong > 45_000) { disconnect({ reconnect: true }); return; }
+          if (Date.now() - lastPong > 45_000) { disconnect({ reconnect: true, keepShares: true }); return; }
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
         }, 20_000);
         try {
@@ -148,7 +123,7 @@ async function pair(port, token, { automatic = false } = {}) {
       } else if (paired && message.type === 'pong') {
         lastPong = Date.now();
       } else if (paired && message.type === 'sessions') {
-        setSessions(message.sessions);
+        sessions = validSessions(message.sessions);
       } else if (paired && message.type === 'revoke') {
         forgetPairing();
       } else if (paired && message.type === 'command') {
@@ -172,40 +147,27 @@ function check(request, ws) {
     throw new Error('Request cancelled, disconnected or expired');
   }
 }
-async function approvedTab(tabId, grant, action = 'read', { autoApproved = false, session = null } = {}) {
+async function approvedTab(tabId, grant) {
   const current = shared.get(tabId);
   if (grant && current !== grant) throw new Error('Tab sharing revoked');
-  if (current?.session && current.session !== session) throw new Error('Tab is shared with another Pi session');
+  if (!current) throw new Error('Tab not shared. Share it from the Pi Browser popup first.');
   const tab = await chrome.tabs.get(tabId);
   if (!tab.url) throw new Error('Tab has no usable URL');
   let url;
   try { url = new URL(tab.url); } catch { throw new Error('Tab URL is invalid'); }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Only ordinary HTTP(S) tabs are supported');
-
-  const active = current ?? grant;
-  if (active && active.origin !== url.origin) {
+  // Chrome ends the popup's access when a tab moves to another site, so sharing ends too.
+  if (current.origin !== url.origin) {
     dropTab(tabId);
-    throw new Error('Tab changed origin; read or share it again');
+    throw new Error('Tab moved to another site, so it is no longer shared. Share it again from the Pi Browser popup.');
   }
-  if (active) {
-    if (active.policy && !allows(url.origin, action)) throw new Error(`Policy does not allow ${action} on this origin`);
-    if (!active.policy && action === 'click' && autoApproved && !allows(url.origin, 'click')) {
-      throw new Error('Autonomous clicks are not allowed on this shared origin');
-    }
-    return { tab, grant: active };
-  }
-  if (!allows(url.origin, action)) throw new Error(`Tab not shared and origin is not allowlisted for ${action}`);
-  const created = { origin: url.origin, id: crypto.randomUUID(), policy: true, session: null };
-  shared.set(tabId, created);
-  await persist();
-  return { tab, grant: created };
+  return { tab, grant: current };
 }
-async function dom(tabId, grant, type, args, request, ws, action = 'read', extra = {}) {
-  const options = { ...extra, session: request.session };
-  const initial = await approvedTab(tabId, grant, action, options);
+async function dom(tabId, grant, type, args, request, ws) {
+  const initial = await approvedTab(tabId, grant);
   check(request, ws);
   await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
-  const current = await approvedTab(tabId, initial.grant, action, options);
+  const current = await approvedTab(tabId, initial.grant);
   check(request, ws);
   const response = await chrome.tabs.sendMessage(tabId, {
     ...args, type, grantId: current.grant.id, origin: current.grant.origin, expiresAt: request.expiresAt,
@@ -229,14 +191,14 @@ async function observeAfterClick(tabId, grant, request, ws) {
   await new Promise((resolve) => setTimeout(resolve, 250));
   const until = Math.min(Date.now() + 5000, request.expiresAt);
   while (Date.now() < until) {
-    const { tab } = await approvedTab(tabId, grant, 'read', { session: request.session });
+    const { tab } = await approvedTab(tabId, grant);
     check(request, ws);
-    if (tab.status === 'complete') return dom(tabId, grant, 'dom_summary', {}, request, ws, 'read');
+    if (tab.status === 'complete') return dom(tabId, grant, 'dom_summary', {}, request, ws);
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error('Page still loading; read it again later');
 }
-async function listTabs(session) {
+async function listTabs() {
   const tabs = await chrome.tabs.query({});
   const result = [];
   for (const tab of tabs) {
@@ -244,77 +206,39 @@ async function listTabs(session) {
     let origin;
     try { origin = new URL(tab.url).origin; } catch { continue; }
     const explicit = shared.get(tab.id);
-    if (explicit?.session && explicit.session !== session) continue; // Another session's tab.
-    if ((explicit && explicit.origin === origin) || allows(origin, 'read')) {
+    if (explicit && explicit.origin === origin) {
       result.push({ tabId: tab.id, title: (tab.title ?? '').slice(0, 300), url: tab.url.slice(0, 2048) });
     }
   }
   return result;
-}
-async function addPolicy(origin, actions) {
-  const record = policyRecord(origin, actions);
-  if (!await chrome.permissions.contains({ origins: [permissionOrigin(record.origin)] })) {
-    throw new Error('Grant the requested site permission from the extension popup first');
-  }
-  policies.set(record.origin, new Set(record.actions));
-  await chrome.storage.local.set({ policies: policyList() });
-  return policyList();
-}
-async function removePolicy(origin) {
-  const normalized = policyOrigin(origin);
-  policies.delete(normalized);
-  await chrome.storage.local.set({ policies: policyList() });
-  if (![...policies.keys()].some((item) => item === normalized)) {
-    await chrome.permissions.remove({ origins: [permissionOrigin(normalized)] });
-  }
-  for (const [tabId, grant] of shared) if (grant.policy && grant.origin === normalized) dropTab(tabId);
-  return policyList();
 }
 async function run(message, request, ws) {
   await ready;
   check(request, ws);
   const { op, args = {} } = message;
   if (op === 'tabs') {
-    const tabs = await listTabs(request.session);
+    const tabs = await listTabs();
     check(request, ws);
     return tabs;
   }
   const tabId = args.tabId;
-  if (op === 'open') {
-    if (typeof args.url !== 'string' || args.url.length > 2048) throw new Error('Invalid URL');
-    let target;
-    try { target = new URL(args.url); } catch { throw new Error('Invalid URL'); }
-    if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password || !allows(target.origin, 'navigate')) {
-      throw new Error('Target origin is not allowlisted for navigation');
-    }
-    const tab = await chrome.tabs.create({ url: target.href, active: false });
-    if (!Number.isSafeInteger(tab.id)) throw new Error('Chrome did not return a tab ID');
-    // The opening session owns the new tab; other sessions cannot see or use it.
-    if (request.session) {
-      shared.set(tab.id, { origin: target.origin, id: crypto.randomUUID(), policy: true, session: request.session });
-      await persist();
-    }
-    await waitForComplete(tab.id, request, ws).catch(() => {});
-    return { tabId: tab.id, url: target.href, title: (tab.title ?? '').slice(0, 300) };
-  }
   if (!Number.isSafeInteger(tabId)) throw new Error('Invalid tab ID');
   const grant = shared.get(tabId);
-  if (op === 'read') return dom(tabId, grant, 'dom_read', {}, request, ws, 'read');
+  if (op === 'read') return dom(tabId, grant, 'dom_read', {}, request, ws);
   if (op === 'query' || op === 'query_validate') {
     return dom(tabId, grant, op === 'query' ? 'dom_query' : 'dom_query_validate', {
       question: args.question, claim: args.claim, cursor: args.cursor, snapshotId: args.snapshotId,
-    }, request, ws, 'read');
+    }, request, ws);
   }
   if (op === 'candidates') {
     if (typeof args.goal !== 'string' || !args.goal.trim() || args.goal.length > 2000) throw new Error('Invalid navigation goal');
-    const page = await dom(tabId, grant, 'dom_candidates', { goal: args.goal }, request, ws, 'read');
-    return { ...page, canAutoApproveClick: allows(new URL(page.url).origin, 'click') };
+    return dom(tabId, grant, 'dom_candidates', { goal: args.goal }, request, ws);
   }
-  if (op !== 'click' || args.approved !== true || typeof args.snapshotId !== 'string' || typeof args.candidateId !== 'string' ||
-      (args.autoApproved !== undefined && typeof args.autoApproved !== 'boolean')) {
+  // Every click is approved by the user in the Pi session that asked for it.
+  if (op !== 'click' || args.approved !== true || typeof args.snapshotId !== 'string' || typeof args.candidateId !== 'string') {
     throw new Error('Unsupported or unapproved browser action');
   }
-  const clicked = await dom(tabId, grant, 'dom_click', args, request, ws, 'click', { autoApproved: args.autoApproved === true });
+  const clicked = await dom(tabId, grant, 'dom_click', { snapshotId: args.snapshotId, candidateId: args.candidateId, approved: true }, request, ws);
   try {
     return { ...clicked, page: await observeAfterClick(tabId, shared.get(tabId), request, ws) };
   } catch (error) {
@@ -324,9 +248,7 @@ async function run(message, request, ws) {
 async function execute(message, ws) {
   if (typeof message.id !== 'string' || requests.has(message.id) ||
       !Number.isFinite(message.expiresAt) || message.expiresAt > Date.now() + 30_000) return;
-  // The bridge stamps the sending session; a bridge without sessions sends none.
-  const session = typeof message.session === 'string' && SESSION.test(message.session) ? message.session : null;
-  const request = { expiresAt: message.expiresAt, cancelled: false, session };
+  const request = { expiresAt: message.expiresAt, cancelled: false };
   requests.set(message.id, request);
   const key = message.args?.tabId ?? 'tabs';
   const work = (queues.get(key) ?? Promise.resolve()).catch(() => {}).then(() => run(message, request, ws));
@@ -344,22 +266,21 @@ async function execute(message, ws) {
   }
 }
 
-// Unexpected worker restart fails closed for transient grants, but persistent policy/pairing survives.
+// Unexpected worker restart fails closed for shared tabs, but pairing survives.
 const startupEpoch = controlEpoch;
 const ready = (async () => {
   const { shares = [] } = await chrome.storage.session.get('shares');
   await Promise.all(shares.map((id) => badge(id, '')));
   await chrome.storage.session.clear();
-  const stored = await chrome.storage.local.get(['pairing', 'policies']);
+  const stored = await chrome.storage.local.get('pairing');
   if (controlEpoch === startupEpoch && stored.pairing && Number.isInteger(stored.pairing.port) && TOKEN.test(stored.pairing.token ?? '')) {
     pairingProfile = { port: stored.pairing.port, token: stored.pairing.token };
   }
-  for (const entry of Array.isArray(stored.policies) ? stored.policies : []) {
-    try {
-      const record = policyRecord(entry.origin, entry.actions);
-      policies.set(record.origin, new Set(record.actions));
-    } catch { /* Invalid stored policy fails closed. */ }
-  }
+  // Older versions kept an allowed-sites list and Chrome site permissions for it.
+  // Nothing uses either now, so forget both rather than leave access behind.
+  await chrome.storage.local.remove('policies');
+  const { origins = [] } = await chrome.permissions.getAll();
+  if (origins.length) await chrome.permissions.remove({ origins }).catch(() => {});
   await chrome.action.setBadgeBackgroundColor({ color: '#b42318' });
   if (pairingProfile) {
     await ensureReconnectAlarm();
@@ -376,7 +297,7 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
-  // Only extension UI may pair/share/revoke/policy-manage. Content scripts cannot grant themselves access.
+  // Only extension UI may pair/share/revoke. Content scripts cannot grant themselves access.
   if (sender.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL('popup.html')) return;
   // STOP bypasses pending controls so a stalled pair/share cannot delay revocation.
   if (message?.type === 'stop') {
@@ -396,23 +317,12 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       const url = new URL(tab.url);
       if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Only ordinary HTTP(S) tabs can be shared');
       if (shared.size >= 254 && !shared.has(tab.id)) throw new Error('At most 254 tabs can be shared');
-      const owner = !sessions.length ? null
-        : sessions.some((item) => item.id === message.session) ? message.session
-          : sessions.length === 1 ? sessions[0].id : undefined;
-      if (owner === undefined) throw new Error('Choose which Pi session gets this tab');
       await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
       if (!connected) throw new Error('Disconnected while sharing');
-      shared.set(tab.id, { origin: url.origin, id: crypto.randomUUID(), policy: false, session: owner });
+      shared.set(tab.id, { origin: url.origin, id: crypto.randomUUID() });
       await badge(tab.id, 'ON');
       await persist();
     } else if (message?.type === 'revoke') dropTab(message.tabId);
-    else if (message?.type === 'policy_add') {
-      const record = policyRecord(message.origin, message.actions);
-      if (!await chrome.permissions.contains({ origins: [permissionOrigin(record.origin)] })) {
-        throw new Error('Grant the site permission before saving this policy');
-      }
-      await addPolicy(record.origin, record.actions);
-    } else if (message?.type === 'policy_remove') await removePolicy(message.origin);
     else if (message?.type !== 'status') throw new Error('Unknown popup request');
     return status();
   });

@@ -189,7 +189,7 @@ function fakeChrome(ws, { reply = true } = {}) {
     if (message.type === 'cancel') seen.cancels.push(message.id);
     if (message.type !== 'command') return;
     seen.commands.push(message);
-    if (reply) ws.send(JSON.stringify({ type: 'result', id: message.id, result: { session: message.session } }));
+    if (reply) ws.send(JSON.stringify({ type: 'result', id: message.id, result: message.args }));
   });
   return seen;
 }
@@ -210,9 +210,10 @@ test('several Pi sessions connect at once, each gets its own replies, and nothin
   assert.equal(new Set(bridges.map((bridge) => bridge.pairing.token)).size, 1);
   const chrome = await connect(bridges[0]);
   const seen = fakeChrome(chrome);
-  const results = await Promise.all(bridges.map((bridge) => bridge.request('tabs', {}, { timeout: 2000 })));
-  assert.deepEqual(results.map((result) => result.session), bridges.map((bridge) => bridge.session));
-  assert.equal(new Set(results.map((result) => result.session)).size, 3);
+  const results = await Promise.all(bridges.map((bridge) => bridge.request('tabs', { who: bridge.session }, { timeout: 2000 })));
+  assert.deepEqual(results.map((result) => result.who), bridges.map((bridge) => bridge.session));
+  // Every session may use every shared tab, so Chrome isn't told which session asked.
+  assert.ok(seen.commands.every((command) => command.session === undefined));
   assert.equal(chrome.readyState, WebSocket.OPEN, 'Chrome must not be evicted by other sessions');
   const announced = seen.sessions.at(-1) ?? chrome.paired.sessions;
   assert.deepEqual(announced.map((session) => session.id).sort(), bridges.map((bridge) => bridge.session).sort());
@@ -247,11 +248,11 @@ test('closing one session cancels only its in-flight commands and leaves the oth
   await rejection;
   await waitFor(() => seen.cancels.includes(seen.commands[0].id), 'Chrome to get a cancel');
   await waitFor(() => seen.sessions.at(-1)?.length === 2, 'the closed session to leave');
-  const kept = stays.request('tabs', {}, { timeout: 2000 });
+  const kept = stays.request('tabs', { who: stays.session }, { timeout: 2000 });
   await waitFor(() => seen.commands.length === 2, 'the remaining session to reach Chrome');
   chrome.send(JSON.stringify({ type: 'result', id: seen.commands[1].id, result: 'ok' }));
   assert.equal(await kept, 'ok');
-  assert.equal(seen.commands[1].session, stays.session);
+  assert.equal(seen.commands[1].args.who, stays.session);
 });
 
 test('when the port owner exits another session takes over without replaying in-flight actions', async (t) => {
@@ -270,7 +271,44 @@ test('when the port owner exits another session takes over without replaying in-
   assert.equal(heir.pairing.port, hub.pairing?.port ?? heir.pairing.port);
   const again = await connect(heir);
   fakeChrome(again);
-  assert.deepEqual(await heir.request('tabs', {}, { timeout: 2000 }), { session: heir.session });
+  assert.deepEqual(await heir.request('tabs', { who: heir.session }, { timeout: 2000 }), { who: heir.session });
   assert.equal(seen.commands.length, 1, 'the in-flight click must not be replayed');
   assert.deepEqual(logs, []);
+});
+
+test('/browser stop in a joined session leaves only that session; Chrome stays paired for the rest', async (t) => {
+  const [hub, leaver, stays] = await sessionsFixture(t, 3);
+  const chrome = await connect(hub);
+  const frames = [];
+  chrome.on('message', (raw) => frames.push(JSON.parse(raw)));
+  fakeChrome(chrome);
+  assert.equal(await leaver.stop({ revoke: true }), false);
+  await waitFor(() => frames.some((frame) => frame.type === 'sessions' && frame.sessions.length === 2), 'the session to leave');
+  assert.equal(chrome.readyState, WebSocket.OPEN);
+  assert.ok(!frames.some((frame) => frame.type === 'revoke'), 'Chrome must not be told to forget pairing');
+  assert.deepEqual(await stays.request('tabs', { who: stays.session }, { timeout: 2000 }), { who: stays.session });
+  assert.equal(leaver.mode, undefined);
+});
+
+test('/browser stop in the hub hands over to another session without revoking Chrome', async (t) => {
+  const [hub, heir] = await sessionsFixture(t, 2);
+  const chrome = await connect(hub);
+  const frames = [];
+  chrome.on('message', (raw) => frames.push(JSON.parse(raw)));
+  const closed = once(chrome, 'close');
+  assert.equal(await hub.stop({ revoke: true }), false);
+  await closed;
+  assert.ok(!frames.some((frame) => frame.type === 'revoke'), 'Chrome must keep its pairing for the other sessions');
+  await waitFor(() => heir.mode === 'hub', 'the remaining session to own the port');
+  const again = await connect(heir);
+  fakeChrome(again);
+  assert.deepEqual(await heir.request('tabs', { who: heir.session }, { timeout: 2000 }), { who: heir.session });
+});
+
+test('/browser stop in the only session revokes the Chrome pairing', async (t) => {
+  const [only] = await sessionsFixture(t, 1);
+  const chrome = await connect(only);
+  const revoked = once(chrome, 'message');
+  assert.equal(await only.stop({ revoke: true }), true);
+  assert.equal(JSON.parse((await revoked)[0]).type, 'revoke');
 });

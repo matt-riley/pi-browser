@@ -29,7 +29,7 @@ test('Pi starts a persistent bridge; explicit pairing and shutdown clean up', as
     registerCommand: (name, command) => commands.set(name, command),
     on: (name, handler) => events.set(name, handler),
   });
-  assert.deepEqual([...tools.keys()], ['browser_tabs', 'browser_open', 'browser_find_tab', 'browser_read', 'browser_query', 'browser_follow_link']);
+  assert.deepEqual([...tools.keys()], ['browser_tabs', 'browser_find_tab', 'browser_read', 'browser_query', 'browser_follow_link']);
   await assert.rejects(readFile(process.env.PI_BROWSER_STATE_PATH), { code: 'ENOENT' });
   await assert.rejects(tools.get('browser_tabs').execute('1', {}, undefined), /disconnected/);
   await assert.rejects(commands.get('browser').handler('', { hasUI: false }), /user interface/);
@@ -58,6 +58,10 @@ test('Pi starts a persistent bridge; explicit pairing and shutdown clean up', as
   assert.deepEqual(JSON.parse(result.content[0].text), { tabs: [], more: 0 });
   assert.doesNotMatch(JSON.stringify(result), new RegExp(token));
   assert.equal(tools.get('browser_follow_link').annotations.destructiveHint, true);
+  // The model is told it only gets shared tabs and that every click asks; no allowlist wording remains.
+  for (const tool of tools.values()) assert.doesNotMatch(`${tool.description} ${JSON.stringify(tool.parameters)}`, /allow|policy/i);
+  assert.match(tools.get('browser_tabs').description, /shared/);
+  assert.match(tools.get('browser_follow_link').description, /asks the user/);
   assert.equal(tools.get('browser_query').annotations.readOnlyHint, true);
   const queryTool = tools.get('browser_query');
   assert.equal(queryTool.parameters.properties.question.maxLength, 2000);
@@ -74,7 +78,9 @@ test('Pi starts a persistent bridge; explicit pairing and shutdown clean up', as
     snapshotId: compactData.snapshotId, detail: 'evidence' });
   assert.match(expandedQuery.content[0].text, /TITLE-DO-NOT-ECHO/);
   const closed = once(ws, 'close');
-  await commands.get('browser').handler('stop', ctx);
+  let stopped;
+  await commands.get('browser').handler('stop', { ...ctx, ui: { ...ctx.ui, notify: (message) => { stopped = message; } } });
+  assert.match(stopped, /Chrome pairing revoked/);
   await closed;
   await assert.rejects(tools.get('browser_tabs').execute('2', {}, undefined), /disconnected/);
   // A new factory can be loaded while the old runtime still owns the saved port.
@@ -93,6 +99,19 @@ test('Pi starts a persistent bridge; explicit pairing and shutdown clean up', as
   await nextCommands.get('browser').handler('', ctx);
   assert.equal(Number(title.match(/Port: (\d+)/)[1]), reloadPort);
   assert.equal(title.match(/Token: ([a-f0-9]{64})/)[1], token);
+  // /browser stop in one session leaves the others connected.
+  const thirdEvents = new Map();
+  const thirdCommands = new Map();
+  register({ registerTool() {}, registerCommand: (name, command) => thirdCommands.set(name, command),
+    on: (name, handler) => thirdEvents.set(name, handler) });
+  t.after(() => thirdEvents.get('session_shutdown')());
+  await thirdEvents.get('session_start')({}, ctx);
+  let notice;
+  await thirdCommands.get('browser').handler('stop', { ...ctx, ui: { ...ctx.ui, notify: (message) => { notice = message; } } });
+  assert.match(notice, /this Pi session.*other Pi sessions stay connected/);
+  title = undefined;
+  await nextCommands.get('browser').handler('', ctx);
+  assert.equal(title.match(/Token: ([a-f0-9]{64})/)[1], token, 'the other session keeps the same pairing');
   // When the owner exits, the joined session takes the port over quietly.
   await events.get('session_shutdown')();
   await nextEvents.get('session_start')({}, ctx);

@@ -8,52 +8,19 @@ async function send(message) {
   if (response.error) throw new Error(response.error);
   return response.result;
 }
-function renderPolicies(policies = []) {
-  $('policies').replaceChildren(...policies.map(({ origin, actions }) => {
-    const item = document.createElement('li');
-    const text = document.createElement('span');
-    text.textContent = `${origin} · ${actions.join(', ')}`;
-    const remove = document.createElement('button');
-    remove.type = 'button';
-    remove.className = 'remove-policy';
-    remove.dataset.origin = origin;
-    remove.textContent = 'Remove';
-    item.append(text, remove);
-    return item;
-  }));
-}
-function renderSessions(sessions) {
-  // Several Pi sessions can be connected. A shared tab belongs to the one picked here.
-  const select = $('session');
-  const chosen = select.value;
-  select.replaceChildren(...sessions.map(({ id, label }) => {
-    const option = document.createElement('option');
-    option.value = id;
-    option.textContent = label;
-    return option;
-  }));
-  if (sessions.some(({ id }) => id === chosen)) select.value = chosen;
-  select.hidden = sessions.length < 2;
-  $('session-field').hidden = sessions.length < 2;
-}
 function render(state) {
   // Keep the popup compatible with a worker that was upgraded while it was running.
   const shares = Array.isArray(state?.shares) ? state.shares : [];
-  const policies = Array.isArray(state?.policies) ? state.policies : [];
   const sessions = Array.isArray(state?.sessions) ? state.sessions : [];
-  const owner = (Array.isArray(state?.shareSessions) ? state.shareSessions : []).find((item) => item.tabId === tab?.id);
-  const ownerLabel = sessions.find(({ id }) => id === owner?.session)?.label;
   const sharing = shares.includes(tab?.id);
-  renderSessions(sessions);
   $('status').textContent = state?.connected
-    ? `Paired with Pi · ${sessions.length || 1} session(s) · ${shares.length} shared tab(s) · ${policies.length} allowed site(s)` +
-      (sharing ? ` · this tab is shared${ownerLabel ? ` with ${ownerLabel}` : ''}` : '')
+    ? `Paired with Pi · ${sessions.length || 1} session(s) · ${shares.length} shared tab(s)` +
+      (sharing ? ' · this tab is shared with every Pi session' : '')
     : state?.paired ? 'Pairing saved · reconnecting to Pi automatically. No need to pair again.'
       : 'Not paired. Run /browser in Pi once to see setup details.';
   $('pairing').hidden = Boolean(state?.paired);
   $('share').disabled = !state?.connected || sharing || !tab?.id;
   $('revoke').disabled = !sharing;
-  renderPolicies(policies);
 }
 async function action(message) {
   try {
@@ -71,29 +38,9 @@ $('pairing').addEventListener('submit', async (event) => {
   $('token').value = '';
   await action({ type: 'pair', port: Number($('port').value), token });
 });
-$('share').addEventListener('click', () => action({ type: 'share', tabId: tab.id, session: $('session').value || undefined }));
+$('share').addEventListener('click', () => action({ type: 'share', tabId: tab.id }));
 $('revoke').addEventListener('click', () => action({ type: 'revoke', tabId: tab.id }));
 $('stop').addEventListener('click', () => action({ type: 'stop' }));
-$('policies').addEventListener('click', async (event) => {
-  const button = event.target.closest('.remove-policy');
-  if (!button) return;
-  await action({ type: 'policy_remove', origin: button.dataset.origin });
-});
-$('policy-form').addEventListener('submit', async (event) => {
-  event.preventDefault();
-  try {
-    const origin = new URL($('origin').value.trim()).origin;
-    const actions = ['read'];
-    if ($('policy-navigate').checked) actions.push('navigate');
-    if ($('policy-click').checked) actions.push('click');
-    const granted = await chrome.permissions.request({ origins: [`${origin}/*`] });
-    if (!granted) throw new Error('Site permission was not granted');
-    await action({ type: 'policy_add', origin, actions });
-    $('origin').value = '';
-  } catch (error) {
-    $('status').textContent = error.message;
-  }
-});
 await action({ type: 'status' }).catch(() => {});
 // The popup is not the reconnect engine; just reflect background connection changes.
 setInterval(() => { void action({ type: 'status' }).catch(() => {}); }, 1000);
