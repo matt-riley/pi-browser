@@ -286,6 +286,11 @@ const ready = (async () => {
   if (controlEpoch === startupEpoch && stored.pairing && Number.isInteger(stored.pairing.port) && TOKEN.test(stored.pairing.token ?? '')) {
     pairingProfile = { port: stored.pairing.port, token: stored.pairing.token };
   }
+  // Older versions kept an allowed-sites list and Chrome site permissions for it.
+  // Nothing uses either now, so forget both rather than leave access behind.
+  await chrome.storage.local.remove('policies');
+  const { origins = [] } = await chrome.permissions.getAll();
+  if (origins.length) await chrome.permissions.remove({ origins }).catch(() => {});
   await chrome.action.setBadgeBackgroundColor({ color: '#b42318' });
   if (pairingProfile) {
     await ensureReconnectAlarm();
