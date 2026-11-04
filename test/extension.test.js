@@ -29,7 +29,7 @@ test('Pi starts a persistent bridge; explicit pairing and shutdown clean up', as
     registerCommand: (name, command) => commands.set(name, command),
     on: (name, handler) => events.set(name, handler),
   });
-  assert.deepEqual([...tools.keys()], ['browser_tabs', 'browser_open', 'browser_find_tab', 'browser_read', 'browser_query', 'browser_follow_link']);
+  assert.deepEqual([...tools.keys()], ['browser_tabs', 'browser_find_tab', 'browser_read', 'browser_query', 'browser_follow_link']);
   await assert.rejects(readFile(process.env.PI_BROWSER_STATE_PATH), { code: 'ENOENT' });
   await assert.rejects(tools.get('browser_tabs').execute('1', {}, undefined), /disconnected/);
   await assert.rejects(commands.get('browser').handler('', { hasUI: false }), /user interface/);
@@ -58,6 +58,10 @@ test('Pi starts a persistent bridge; explicit pairing and shutdown clean up', as
   assert.deepEqual(JSON.parse(result.content[0].text), { tabs: [], more: 0 });
   assert.doesNotMatch(JSON.stringify(result), new RegExp(token));
   assert.equal(tools.get('browser_follow_link').annotations.destructiveHint, true);
+  // The model is told it only gets shared tabs and that every click asks; no allowlist wording remains.
+  for (const tool of tools.values()) assert.doesNotMatch(`${tool.description} ${JSON.stringify(tool.parameters)}`, /allow|policy/i);
+  assert.match(tools.get('browser_tabs').description, /shared/);
+  assert.match(tools.get('browser_follow_link').description, /asks the user/);
   assert.equal(tools.get('browser_query').annotations.readOnlyHint, true);
   const queryTool = tools.get('browser_query');
   assert.equal(queryTool.parameters.properties.question.maxLength, 2000);

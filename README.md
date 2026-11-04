@@ -1,6 +1,6 @@
 # Pi Browser
 
-A Chrome companion that gives Pi a **persistent, policy-controlled browser connection**. Pi owns the goal, Jev chooses from DOM-derived candidates, and deterministic code validates and executes actions within user-configured origin policies.
+A Chrome companion that gives Pi a **persistent browser connection to the tabs you share**. Pi owns the goal, Jev chooses from DOM-derived candidates, and deterministic code validates every action. Pi can use only tabs you share from the popup, and every click asks you first.
 
 ```text
 Pi tools → authenticated loopback WebSocket → Chrome MV3 worker → isolated DOM script
@@ -23,11 +23,11 @@ pi -e ./src/index.js
 
 1. In Chrome, open `chrome://extensions`, enable **Developer mode**, select **Load unpacked**, and choose this repo's `chrome/` directory. No build is needed.
 2. In Pi, run **`/browser`** once. Copy the port and pairing token from its dialog into the Chrome extension popup, then select **Pair with Pi**. The token is shown only in command UI, not returned to the model.
-3. In the popup, add exact site origins and choose permissions: **Read**, **Open and navigate**, and optionally **Click eligible links without prompting**. Chrome asks for the site permission once.
-4. Ask Pi to find and browse the allowlisted site. It can list allowed tabs, open allowlisted URLs in background tabs, read pages, and use Jev to choose eligible links.
-5. Use **`/browser stop`**, the popup's **Disconnect & stop all**, or **`/browser reset`** to revoke persistent pairing. Remove individual sites from the popup to revoke their policies.
+3. On a tab you want Pi to use, open the extension popup and select **Share this tab**. Opening the popup is what gives the extension access to that tab; it has no access to any site otherwise.
+4. Ask Pi about the tab. It can list shared tabs, read them, query them, and use Jev to choose an eligible link. Every click asks you in Pi first.
+5. Use **Stop sharing this tab** to take a tab back. Use **`/browser stop`**, the popup's **Disconnect & stop all**, or **`/browser reset`** to revoke persistent pairing.
 
-Pairing and policies persist across Pi reloads, Chrome worker restarts and browser restarts. You should not need to pair or share every session. The popup hides setup once paired and distinguishes **pairing saved / reconnecting** from **not paired**. Manual **Share this tab** remains a temporary read path for sites that are not in the policy.
+Pairing persists across Pi reloads, Chrome worker restarts and browser restarts, so you only pair once. Shared tabs don't persist: sharing ends when you stop it, close the tab, move the tab to another site, or Chrome restarts the extension. Links within the same site keep the tab shared. The popup hides setup once paired and distinguishes **pairing saved / reconnecting** from **not paired**.
 
 Reconnect normally takes seconds. A stopped Chrome worker is woken by a one-minute alarm (Chrome may delay it); browser startup also triggers reconnect. Pi waits up to eight seconds for a connection **before** dispatch, never replays an action. Don't use `/browser stop`, `/browser reset`, or **Disconnect & stop all** as a reconnect button: those deliberately revoke pairing.
 
@@ -46,8 +46,7 @@ Each session only sees its own tabs:
 | Tab | Who can use it |
 | --- | --- |
 | Shared with **Share this tab** | The session picked in the popup's **Share with Pi session** list. The list appears only when two or more sessions are connected; with one session the tab goes to that session. |
-| Opened with `browser_open` | The session that opened it. |
-| Any other tab on an allowlisted site | Every session. Site policies belong to you, not to one session. |
+| Any tab you haven't shared | No session. |
 
 Another session gets *Tab is shared with another Pi session* and never sees the tab in `browser_tabs`. When a session ends, Chrome drops the tabs it owned. Click approvals appear in the session that asked for the click.
 
@@ -61,12 +60,11 @@ For persistent Pi loading, optionally run `pi install /absolute/path/to/pi-brows
 
 | Tool | Behavior |
 | --- | --- |
-| `browser_tabs()` | Page-sized overview of shared or policy-allowed tabs; `more` counts the rest |
-| `browser_open({ url })` | Open an HTTP(S) URL on an origin allowlisted for navigation in a background tab |
-| `browser_find_tab({ goal })` | Jev chooses an allowed tab without activating or navigating it |
+| `browser_tabs()` | Page-sized overview of shared tabs; `more` counts the rest |
+| `browser_find_tab({ goal })` | Jev chooses a shared tab without activating or navigating it |
 | `browser_read({ tabId })` | Bounded DOM text (2,000 characters) and eligible links |
 | `browser_query({ tabId, question, claim?, detail?, snapshotId?, cursor? })` | Compact finding or claim verdict by default; full excerpts only with `detail: "evidence"` |
-| `browser_follow_link({ tabId, goal })` | Jev chooses an eligible same-origin link, then clicks it under the site's policy or asks for confirmation |
+| `browser_follow_link({ tabId, goal })` | Jev chooses an eligible same-origin link, then asks you before clicking it |
 
 Selection returns `selected`, `uncertain`, or `no_match`. Link actions also return `denied` or `clicked`. Inspect `result.page` after a click; `result.observationError` means the click occurred but a fresh page could not be observed. A new snapshot is an observation, **not proof that the overall goal succeeded**.
 
@@ -102,18 +100,19 @@ browser_query({ tabId: 123, question: 'Which head has passed checks?',
 
 - The bridge listens only on loopback. Persistent pairing uses a stable local port and a credential file at `~/.pi/pi-browser/credentials.json` with restrictive permissions by default. Set `PI_BROWSER_STATE_PATH` to change it. `/browser reset` rotates the credential.
 - The Chrome extension stores the paired port/token in `chrome.storage.local` and reconnects automatically when Pi is available. The `alarms` permission provides worker wakeups; it grants no site access. `/browser stop` sends an explicit revoke to a connected companion; the companion clears its profile and alarm. Use the popup's stop button to forget pairing when Pi is offline.
-- Site access starts empty. A user must add each exact HTTP(S) origin in the popup, approve its Chrome host permission, and choose its actions. The model cannot add or widen a policy.
-- **Allowlisted clicks can run without a prompt.** A click on a site without the `click` policy still requires interactive approval; noninteractive Pi modes cannot perform it. Jev confidence never grants authorization.
-- Only rendered HTTP(S), same-origin anchor links are eligible. Downloads, new-window links, buttons, form submissions, arbitrary scripts, and other URL schemes are excluded. `browser_open` requires the target origin's `navigate` policy.
+- The extension has no site permissions. It reaches a tab only through Chrome's `activeTab`, which you grant by opening the popup on that tab, and only after you select **Share this tab**. The model can't share tabs, open tabs or navigate to new URLs.
+- **Every click asks you first**, in the Pi session that wants to click. A Pi session with no interactive UI can't click at all; it says so before reading the page or calling Jev. Jev confidence never grants authorization.
+- Only rendered HTTP(S), same-origin anchor links are eligible. Downloads, new-window links, buttons, form submissions, arbitrary scripts, and other URL schemes are excluded.
+- If a shared tab moves to another site, Chrome ends the extension's access and the tab stops being shared. Coming back to the first site doesn't restore it; share the tab again.
 - IDs refer to original elements in one snapshot and one grant. Any observed DOM mutation, changed URL, replacement, obstruction, expiry (two minutes), or revoke invalidates a target. Dynamic pages may need another read; the tool does not silently retry clicks.
 - Operations are serialized per tab. Requests have deadlines and support cancellation. Stop/revoke prevents new and queued actions; an already-dispatched click may have occurred and cannot be undone. After a disconnect, timeout, or action error, **read before retrying**.
-- Persistent policies survive transient Chrome worker restarts, but in-memory snapshot grants do not. The extension recreates a grant only after rechecking the current URL and policy.
+- Pairing survives Chrome worker restarts; shared tabs and snapshot grants don't.
 - DOM text, titles, labels and URLs are untrusted evidence. Jev gets a closed candidate set plus an explicit `none` option; it cannot invent an executable selector.
 - Model-facing payloads are deliberately small: tab overviews and reads cost at most 2,000 characters each, link summaries are capped at 12, and default queries contain at most a 320-character finding. Full query excerpts are opt-in. Link navigation sends Jev only 48 `{id, label, href}` candidates, never the page body. Queries send up to 16,000 excerpt characters through Pi to Jev, without putting that batch in Pi's conversation. Tool `details` and `structuredContent` are not model-facing: only `content` is sent to the provider, so duplicating a compact result there costs session storage, not prompt tokens. Click observations contain text only. Remaining captured text and snapshot data stay in Chrome.
 
 ### Privacy
 
-The API key stays in the Pi process; the Chrome extension never receives it. Input values, textarea content and editable content are not intentionally extracted, but ordinary visible text, URLs, labels, and surrounding link text can contain sensitive data. **Only allow sites whose content you are willing to send to TypeSafe and Pi's model provider.** The bridge itself is local; model inference is not. Compact results can be retained in Pi conversation history; full query excerpts enter it only when explicitly requested. Queries still send bounded page content to TypeSafe. This extension adds no durable page-content logs.
+The API key stays in the Pi process; the Chrome extension never receives it. Input values, textarea content and editable content are not intentionally extracted, but ordinary visible text, URLs, labels, and surrounding link text can contain sensitive data. **Only share tabs whose content you are willing to send to TypeSafe and Pi's model provider.** The bridge itself is local; model inference is not. Compact results can be retained in Pi conversation history; full query excerpts enter it only when explicitly requested. Queries still send bounded page content to TypeSafe. This extension adds no durable page-content logs.
 
 ## Configuration
 
@@ -143,11 +142,11 @@ npm run test:pi                  # Installed Pi changed-helper reload/pairing/st
 
 Unit tests also connect several Pi sessions at once with a fake Chrome peer. They check that every session gets its own replies, nothing is evicted, a session can't join under another session's ID, a leaving session's in-flight commands are cancelled, the port is taken over when its owner exits, and nothing is logged. A second browser fixture pairs real Chromium with two sessions and checks tab isolation, the popup's session picker, and cleanup when a session ends.
 
-The browser fixture checks pairing, persistent reconnect, policy-allowed browsing, autonomous clicks, unshared-tab rejection, link filtering, snapshots, stale-target refusal, revocation, Jev tab/link selection, actual navigation and cross-origin refusal. Reconnect checks kill the worker with the popup closed and let a real Chrome alarm wake it, restart the entire browser using the same profile, and verify explicit revocation removes the saved pairing/alarm. Query checks cover evidence beyond the preview, continuation without duplicate passage IDs, privacy exclusions, compact output budgets, opt-in cached expansion and mutations during inference. Unit tests cover no-match/uncertainty, claim gates and malformed answers; the live fixture also tests real Jev evidence selection and missing revision evidence. It temporarily grants **only fixture-host permissions** in a copied manifest because headless tests cannot perform the popup permission gesture. Tests never touch your normal Chrome profile.
+The browser fixture loads the shipped manifest with no host permissions and opens the popup on each tab through Chrome's extension action, so access comes only from `activeTab`. It checks pairing, persistent reconnect, unshared-tab rejection, that same-site clicks keep a tab shared and a move to another site ends sharing, link filtering, snapshots, stale-target refusal, revocation, Jev tab/link selection, actual navigation and cross-origin refusal. Reconnect checks kill the worker with the popup closed and let a real Chrome alarm wake it, restart the entire browser using the same profile, and verify explicit revocation removes the saved pairing/alarm. Query checks cover evidence beyond the preview, continuation without duplicate passage IDs, privacy exclusions, compact output budgets, opt-in cached expansion and mutations during inference. Unit tests cover no-match/uncertainty, claim gates and malformed answers; the live fixture also tests real Jev evidence selection and missing revision evidence. Tests never touch your normal Chrome profile.
 
 ## Deliberately not in this slice
 
-Forms, buttons, downloads, arbitrary cross-origin navigation chains, iframe/shadow-DOM traversal, visual/canvas interaction, screenshots, automatic goal verification, multi-step autonomous workflows, and Chrome Web Store packaging. Synthetic DOM clicks also do not satisfy sites that require trusted physical input. Add each new action as a separate policy permission rather than broadening `click` implicitly.
+Forms, buttons, downloads, arbitrary cross-origin navigation chains, iframe/shadow-DOM traversal, visual/canvas interaction, screenshots, automatic goal verification, multi-step autonomous workflows, and Chrome Web Store packaging. Synthetic DOM clicks also do not satisfy sites that require trusted physical input. Opening new tabs and clicking without asking were removed on purpose.
 
 ## References
 

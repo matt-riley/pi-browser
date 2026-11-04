@@ -2,13 +2,32 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { mkdtemp, cp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, cp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium } from 'playwright';
 import { Bridge } from '../src/bridge.ts';
 import { Browser } from '../src/browser.ts';
 import { createJev } from '../src/selection.ts';
+
+// The shipped manifest has no host access: Pi Browser reaches a tab only through
+// activeTab, which Chrome grants when the user opens the extension on that tab.
+// Headless tests can't click the toolbar, so they ask Chrome to run the action.
+const launch = (profile, extension) => chromium.launchPersistentContext(profile, {
+  channel: 'chromium', headless: true,
+  args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`, '--enable-unsafe-extension-debugging'],
+});
+async function openPopupOn(context, extensionId, page) {
+  await page.bringToFront();
+  const cdp = await context.browser().newBrowserCDPSession();
+  const { targetInfos } = await cdp.send('Target.getTargets', { filter: [{ type: 'tab' }] });
+  const tab = targetInfos.find((info) => info.url === page.url());
+  assert.ok(tab, `No tab target for ${page.url()}`);
+  await cdp.send('Extensions.triggerAction', { id: extensionId, targetId: tab.targetId });
+  await cdp.detach();
+}
+const canInject = (worker, tabId) => worker.evaluate((id) => chrome.scripting.executeScript({ target: { tabId: id }, func: () => true })
+  .then(() => true, () => false), tabId);
 
 const fixtureHTML = `<!doctype html><html><head><title>Project dashboard</title></head><body>
 <h1>Project dashboard</h1><p>Manage your project and inspect deployment activity.</p>
@@ -32,11 +51,6 @@ test('MV3 bridge → shared tabs → DOM → Jev selection → approved click, w
   const temp = await mkdtemp(join(tmpdir(), 'pi-browser-test-'));
   const extension = join(temp, 'chrome');
   await cp(resolve('chrome'), extension, { recursive: true });
-  const manifest = JSON.parse(await readFile(join(extension, 'manifest.json'), 'utf8'));
-  // Headless tests cannot press the browser toolbar to grant activeTab. Grant ONLY
-  // fixture hosts in the temporary copy; the shipped manifest has no host access.
-  manifest.host_permissions = ['http://127.0.0.1/*', 'http://localhost/*'];
-  await writeFile(join(extension, 'manifest.json'), JSON.stringify(manifest));
   const bridge = new Bridge({ persistent: true, statePath: join(temp, 'credentials.json'), port: 0 });
   await bridge.start();
   // Keep the first ephemeral allocation stable for the simulated Pi restart.
@@ -48,10 +62,7 @@ test('MV3 bridge → shared tabs → DOM → Jev selection → approved click, w
     await new Promise((resolve) => server.close(resolve));
     await rm(temp, { recursive: true, force: true });
   });
-  context = await chromium.launchPersistentContext(join(temp, 'profile'), {
-    channel: 'chromium', headless: true,
-    args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
-  });
+  context = await launch(join(temp, 'profile'), extension);
   const worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
   const id = new URL(worker.url()).host;
   const target = await context.newPage();
@@ -66,9 +77,12 @@ test('MV3 bridge → shared tabs → DOM → Jev selection → approved click, w
   const tabId = await worker.evaluate(async (url) => (await chrome.tabs.query({})).find((tab) => tab.url === url + '/').id, base);
   const ui = (message) => popup.evaluate((m) => chrome.runtime.sendMessage(m), message);
   const share = async () => {
+    await openPopupOn(context, id, target);
     const response = await ui({ type: 'share', tabId });
     assert.equal(response.error, undefined, JSON.stringify(response));
   };
+  // No allowlist: an open tab nobody shared is invisible and unusable.
+  assert.equal(await canInject(worker, tabId), false);
   assert.deepEqual(await bridge.request('tabs'), []);
   await assert.rejects(bridge.request('read', { tabId }), /not shared/);
   await assert.rejects(bridge.request('query', { tabId, question: 'Checks?' }), /not shared/);
@@ -239,6 +253,8 @@ test('MV3 bridge → shared tabs → DOM → Jev selection → approved click, w
   assert.equal(navigated.status, 'clicked');
   assert.match(navigated.result.page.text, /Deployment logs/);
   assert.equal(target.url(), `${base}/deployments`);
+  // A same-site click keeps the tab shared: Chrome keeps activeTab within the site.
+  assert.match((await bridge.request('read', { tabId })).title, /Deployments/);
 
   // Mutation during approval is revalidated by the content script after approval.
   await target.goto(base);
@@ -250,17 +266,18 @@ test('MV3 bridge → shared tabs → DOM → Jev selection → approved click, w
   }), /Stale|changed/);
   assert.equal(target.url(), `${base}/`);
 
-  // Cross-origin navigation revokes access rather than inheriting a tab ID grant.
+  // Moving to another site ends sharing. Chrome drops activeTab too, so coming
+  // back doesn't restore it: the user has to share the tab again.
   await target.goto(base.replace('127.0.0.1', 'localhost'));
-  await assert.rejects(bridge.request('read', { tabId }), /not shared|origin/);
+  await assert.rejects(bridge.request('read', { tabId }), /not shared|another site/);
   assert.deepEqual(await bridge.request('tabs'), []);
   await target.goto(base);
-  await ui({ type: 'policy_add', origin: base, actions: ['read', 'navigate', 'click'] });
-  const policyTabs = await bridge.request('tabs');
-  assert.equal(policyTabs[0].tabId, tabId);
-  const automatic = await browser.followLink(tabId, 'Open deployments automatically');
-  assert.equal(automatic.status, 'clicked');
-  await target.goto(base);
+  assert.equal(await canInject(worker, tabId), false);
+  await assert.rejects(bridge.request('read', { tabId }), /not shared/);
+  // Without a way to ask, a session cannot click at all.
+  await assert.rejects(browser.followLink(tabId, 'Open deployments'), /can't ask you to approve clicks/);
+  await share();
+  assert.equal((await bridge.request('tabs'))[0].tabId, tabId);
   await bridge.stop();
   await bridge.start();
   let reconnected;
@@ -270,7 +287,8 @@ test('MV3 bridge → shared tabs → DOM → Jev selection → approved click, w
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   assert.equal(reconnected.result.connected, true);
-  assert.equal((await bridge.request('tabs'))[0].tabId, tabId);
+  // Losing the Pi connection drops shares, and no site list brings them back.
+  assert.deepEqual(await bridge.request('tabs'), []);
   await popup.getByRole('button', { name: 'Disconnect & stop all' }).click();
   await popup.waitForFunction(() => document.getElementById('status').textContent.includes('Not paired'));
   assert.equal(await worker.evaluate((id) => chrome.action.getBadgeText({ tabId: id }), tabId), '');
@@ -303,20 +321,16 @@ test('MV3 bridge → shared tabs → DOM → Jev selection → approved click, w
   const checkPopup = await context.newPage();
   await checkPopup.goto(`chrome-extension://${id}/popup.html`);
   const restarted = await checkPopup.evaluate(() => chrome.runtime.sendMessage({ type: 'status' }));
-  assert.deepEqual(restarted.result, { connected: true, paired: true, shares: [], policies: [{
-    origin: new URL(base).origin, actions: ['click', 'navigate', 'read'],
-  }], sessions: [{ id: bridge.session, label: bridge.label }], shareSessions: [] });
+  assert.deepEqual(restarted.result, { connected: true, paired: true, shares: [], sessions: [{ id: bridge.session, label: bridge.label }], shareSessions: [] });
   assert.equal(await checkPopup.locator('#pairing').isVisible(), false);
-  assert.equal((await bridge.request('tabs'))[0].tabId, tabId);
+  // A worker restart drops shares; there is no site list to bring them back.
+  assert.deepEqual(await bridge.request('tabs'), []);
 
   // Restart the entire browser using the same profile, not just Pi's socket.
   const browserClosed = once(bridge.peer, 'close');
   await context.close();
   await browserClosed;
-  context = await chromium.launchPersistentContext(join(temp, 'profile'), {
-    channel: 'chromium', headless: true,
-    args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
-  });
+  context = await launch(join(temp, 'profile'), extension);
   await awaitConnection();
   const newWorker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
   assert.ok(await newWorker.evaluate(() => chrome.alarms.get('pi-browser-reconnect')));
@@ -341,9 +355,6 @@ test('several Pi sessions share one Chrome pairing, and each session only sees i
   const temp = await mkdtemp(join(tmpdir(), 'pi-browser-sessions-'));
   const extension = join(temp, 'chrome');
   await cp(resolve('chrome'), extension, { recursive: true });
-  const manifest = JSON.parse(await readFile(join(extension, 'manifest.json'), 'utf8'));
-  manifest.host_permissions = ['http://127.0.0.1/*', 'http://localhost/*'];
-  await writeFile(join(extension, 'manifest.json'), JSON.stringify(manifest));
   const statePath = join(temp, 'credentials.json');
   const alpha = new Bridge({ persistent: true, statePath, port: 0, label: 'alpha' });
   const beta = new Bridge({ persistent: true, statePath, port: 0, label: 'beta' });
@@ -359,16 +370,17 @@ test('several Pi sessions share one Chrome pairing, and each session only sees i
   beta.port = alpha.pairing.port;
   await beta.start();
   assert.equal(beta.mode, 'client');
-  context = await chromium.launchPersistentContext(join(temp, 'profile'), {
-    channel: 'chromium', headless: true,
-    args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
-  });
+  context = await launch(join(temp, 'profile'), extension);
   const worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
   const id = new URL(worker.url()).host;
   const pageA = await context.newPage();
   await pageA.goto(`${base}/a`);
   const pageB = await context.newPage();
   await pageB.goto(`${base}/b`);
+  const pageC = await context.newPage();
+  await pageC.goto(`${base}/c`);
+  await openPopupOn(context, id, pageA);
+  await openPopupOn(context, id, pageB);
   const popup = await context.newPage();
   await popup.goto(`chrome-extension://${id}/popup.html`);
   const ui = (message) => popup.evaluate((m) => chrome.runtime.sendMessage(m), message);
@@ -382,6 +394,7 @@ test('several Pi sessions share one Chrome pairing, and each session only sees i
   const tabIdOf = (url) => worker.evaluate(async (u) => (await chrome.tabs.query({})).find((tab) => tab.url === u).id, url);
   const tabA = await tabIdOf(`${base}/a`);
   const tabB = await tabIdOf(`${base}/b`);
+  const tabC = await tabIdOf(`${base}/c`);
 
   // With several sessions the popup must say which session gets the tab.
   assert.match((await ui({ type: 'share', tabId: tabA })).error, /Choose which Pi session/);
@@ -398,12 +411,12 @@ test('several Pi sessions share one Chrome pairing, and each session only sees i
   await assert.rejects(beta.request('read', { tabId: tabA }), /another Pi session/);
   await assert.rejects(alpha.request('candidates', { tabId: tabB, goal: 'Home' }), /another Pi session/);
 
-  // A tab a session opens belongs to that session, even on an allowlisted site.
-  await ok({ type: 'policy_add', origin: base, actions: ['read', 'navigate'] });
-  const opened = await beta.request('open', { url: `${base}/c` });
-  assert.ok((await beta.request('tabs')).some((tab) => tab.tabId === opened.tabId));
-  assert.ok(!(await alpha.request('tabs')).some((tab) => tab.tabId === opened.tabId || tab.tabId === tabB));
-  await assert.rejects(alpha.request('read', { tabId: opened.tabId }), /another Pi session/);
+  // A tab on the same site that nobody shared is usable by no session, and Pi can't open tabs.
+  for (const session of [alpha, beta]) {
+    assert.ok(!(await session.request('tabs')).some((tab) => tab.tabId === tabC));
+    await assert.rejects(session.request('read', { tabId: tabC }), /not shared/);
+    await assert.rejects(session.request('open', { url: `${base}/d` }), /Invalid tab ID|Unsupported/);
+  }
 
   // The popup offers a session picker only when there is a choice to make.
   await popup.reload();

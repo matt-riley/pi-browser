@@ -27,17 +27,31 @@ test('requires approval and then clicks the exact snapshot candidate once', asyn
     return true;
   } });
   assert.equal(result.status, 'clicked');
-  assert.deepEqual(calls[1], { op: 'click', args: { tabId: 1, snapshotId: 's1', candidateId: 'e1', approved: true, autoApproved: false } });
+  assert.deepEqual(calls[1], { op: 'click', args: { tabId: 1, snapshotId: 's1', candidateId: 'e1', approved: true } });
+});
+test('every click asks, even if the browser says a site allows clicks without asking', async () => {
+  const { browser, bridge, calls } = fixture();
+  const request = bridge.request;
+  bridge.request = async (op, args) => ({ ...await request(op, args), ...(op === 'candidates' ? { canAutoApproveClick: true } : {}) });
+  let asked = 0;
+  assert.equal((await browser.followLink(1, 'Open deployments', { confirm: async () => { asked++; return false; } })).status, 'denied');
+  assert.equal(asked, 1);
+  assert.equal(calls.filter((c) => c.op === 'click').length, 0);
 });
 test('denied, absent UI, no-match and cancellation never click', async () => {
   for (const confirm of [async () => false, undefined]) {
     const { browser, calls } = fixture();
-    if (confirm) assert.equal((await browser.followLink(1, 'Open deployments', { confirm })).status, 'denied');
-    else await assert.rejects(browser.followLink(1, 'Open deployments'), /interactive approval/);
-    assert.equal(calls.filter((c) => c.op === 'click').length, 0);
+    if (confirm) {
+      assert.equal((await browser.followLink(1, 'Open deployments', { confirm })).status, 'denied');
+      assert.equal(calls.filter((c) => c.op === 'click').length, 0);
+    } else {
+      // Without a UI to ask, fail at once: no page read, no Jev call, no click.
+      await assert.rejects(browser.followLink(1, 'Open deployments'), /can't ask you to approve clicks/);
+      assert.deepEqual(calls, []);
+    }
   }
   const { browser, calls } = fixture('none');
-  assert.equal((await browser.followLink(1, 'Open deployments')).status, 'no_match');
+  assert.equal((await browser.followLink(1, 'Open deployments', { confirm: async () => true })).status, 'no_match');
   assert.equal(calls.length, 1);
   const other = fixture();
   const controller = new AbortController();
@@ -70,20 +84,10 @@ test('never retries failed mutations; validates browser responses and refuses tr
   await assert.rejects(browser.followLink(1, 'Open deployments', { confirm: async () => true }), /Stale/);
   assert.equal(calls.filter((c) => c.op === 'click').length, 1);
   bridge.request = async () => ({ ...page, candidates: Array(49).fill(page.links[0]) });
-  await assert.rejects(browser.followLink(1, 'Open deployments'), /candidate/);
+  await assert.rejects(browser.followLink(1, 'Open deployments', { confirm: async () => true }), /candidate/);
   bridge.request = async () => ({ text: '' });
   await assert.rejects(browser.read(1), /Invalid DOM/);
 });
-test('opens only through the bridge policy boundary', async () => {
-  const { browser, bridge } = fixture();
-  bridge.request = async (op, args) => {
-    assert.equal(op, 'open');
-    assert.equal(args.url, 'https://example.com/search');
-    return { tabId: 9, url: args.url, title: 'Search' };
-  };
-  assert.deepEqual(await browser.open('https://example.com/search'), { tabId: 9, url: 'https://example.com/search', title: 'Search' });
-});
-
 test('finds tabs through the same Jev selection boundary', async () => {
   const { browser } = fixture('t1');
   const result = await browser.findTab('Example');

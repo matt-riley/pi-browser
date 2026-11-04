@@ -80,14 +80,6 @@ export class Browser {
       candidates: tabs.map((t) => ({ ...t, id: `t${t.tabId}` })) });
   }
 
-  async open(url, signal) {
-    const result = await this.bridge.request('open', { url }, { signal });
-    if (!Number.isSafeInteger(result?.tabId) || typeof result.url !== 'string') {
-      throw new Error('Invalid browser open response');
-    }
-    return result;
-  }
-
   read(tabId, signal) {
     return this.serial(tabId, signal, async () => compactPage(await this.snapshot(tabId, signal)));
   }
@@ -155,6 +147,11 @@ export class Browser {
   }
 
   followLink(tabId, goal, { signal, confirm } = {}) {
+    // Every click needs the user's approval in this session. Without a UI to ask,
+    // stop before reading the page or calling Jev.
+    if (!confirm) {
+      return Promise.reject(new Error("This Pi session can't ask you to approve clicks, so it can't follow links. No click was made."));
+    }
     return this.serial(tabId, signal, async () => {
       // The extension ranks links locally and sends only a small candidate set to Pi.
       const page = await this.candidates(tabId, goal, signal);
@@ -164,17 +161,12 @@ export class Browser {
       });
       if (decision.status !== 'selected') return decision;
       const target = decision.candidate;
-      const autoApproved = page.canAutoApproveClick === true;
-      if (!autoApproved) {
-        if (!confirm) throw new Error('Click requires an interactive approval; no action taken');
-        signal?.throwIfAborted();
-        const approved = await confirm({ tabId, url: page.url, label: target.label, href: target.href });
-        signal?.throwIfAborted();
-        if (!approved) return { ...decision, status: 'denied' };
-      }
       signal?.throwIfAborted();
+      const approved = await confirm({ tabId, url: page.url, label: target.label, href: target.href });
+      signal?.throwIfAborted();
+      if (!approved) return { ...decision, status: 'denied' };
       const result = await this.bridge.request('click', {
-        tabId, snapshotId: page.snapshotId, candidateId: target.id, approved: true, autoApproved,
+        tabId, snapshotId: page.snapshotId, candidateId: target.id, approved: true,
       }, { signal });
       // Never retry a click. Even a failed response may follow a successful action.
       return { ...decision, status: 'clicked', result: { ...result, page: validateSummary(result.page) } };
