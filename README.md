@@ -31,7 +31,27 @@ Pairing and policies persist across Pi reloads, Chrome worker restarts and brows
 
 Reconnect normally takes seconds. A stopped Chrome worker is woken by a one-minute alarm (Chrome may delay it); browser startup also triggers reconnect. Pi waits up to eight seconds for a connection **before** dispatch, never replays an action. Don't use `/browser stop`, `/browser reset`, or **Disconnect & stop all** as a reconnect button: those deliberately revoke pairing.
 
-Only **one Pi session owns the bridge port** at a time. If `/browser` reports `EADDRINUSE`, close the other session's bridge rather than replacing credentials. Keep `PI_BROWSER_STATE_PATH` and port overrides consistent; port `0` is for isolated tests, not persistent daily use.
+### Several Pi sessions
+
+**Several Pi sessions can use the browser at once.** They share one port, one token and one Chrome pairing:
+
+- The first session to start owns the port (the *hub*). It holds the Chrome connection.
+- Later sessions see the port is busy and **join the hub** over the same WebSocket port, on the `/pi` path, using the saved token. They don't warn or log while they do it.
+- The hub relays each session's commands to Chrome, stamps them with that session's ID, and sends results back to the right session.
+- If the hub's session exits or reloads, a remaining session **takes the port over** quietly and Chrome reconnects to it. Commands that were in flight fail with *Browser disconnected* and are never replayed. Read before retrying.
+- `/browser` in any session shows the same port and token. `/browser stop` in any session revokes the Chrome pairing. `/browser reset` in any session rotates the token for every session.
+
+Each session only sees its own tabs:
+
+| Tab | Who can use it |
+| --- | --- |
+| Shared with **Share this tab** | The session picked in the popup's **Share with Pi session** list. The list appears only when two or more sessions are connected; with one session the tab goes to that session. |
+| Opened with `browser_open` | The session that opened it. |
+| Any other tab on an allowlisted site | Every session. Site policies belong to you, not to one session. |
+
+Another session gets *Tab is shared with another Pi session* and never sees the tab in `browser_tabs`. When a session ends, Chrome drops the tabs it owned. Click approvals appear in the session that asked for the click.
+
+Keep `PI_BROWSER_STATE_PATH` and port overrides the same in every session, or sessions can't find each other. If `/browser` says the port is busy and not answering as a Pi browser bridge, another program holds it; set `PI_BROWSER_PORT` to a free port. Port `0` is for isolated tests, not persistent daily use.
 
 Local helpers use `.ts` so Pi's transpiled module graph refreshes them on `/reload`. Native `.js` helper imports can stay cached in a running Pi process even when the entry point reloads. The installed-Pi regression test changes bridge source before reloading and checks that the new code actually executes. No build step is required; standalone checks use Node's built-in type stripping.
 
@@ -102,7 +122,7 @@ The API key stays in the Pi process; the Chrome extension never receives it. Inp
 | `TYPESAFE_API_KEY` | Required for Jev selection |
 | `TYPESAFE_MODEL` | `jev-latest` |
 | `TYPESAFE_BASE_URL` | SDK default, `https://api.typesafe.ai` |
-| `PI_BROWSER_PORT` | `37123` for persistent mode |
+| `PI_BROWSER_PORT` | `37123` for persistent mode, shared by every Pi session |
 | `PI_BROWSER_TOKEN` | Generated and stored locally |
 | `PI_BROWSER_STATE_PATH` | `~/.pi/pi-browser/credentials.json` |
 | `PI_BROWSER_MIN_CONFIDENCE` | `0.7` |
@@ -120,6 +140,8 @@ npm run test:browser             # Isolated Chromium profile; mocked Jev
 npm run test:live                # Same fixture, real Jev; requires key and costs API tokens
 npm run test:pi                  # Installed Pi changed-helper reload/pairing/stop regression; no model calls
 ```
+
+Unit tests also connect several Pi sessions at once with a fake Chrome peer. They check that every session gets its own replies, nothing is evicted, a session can't join under another session's ID, a leaving session's in-flight commands are cancelled, the port is taken over when its owner exits, and nothing is logged. A second browser fixture pairs real Chromium with two sessions and checks tab isolation, the popup's session picker, and cleanup when a session ends.
 
 The browser fixture checks pairing, persistent reconnect, policy-allowed browsing, autonomous clicks, unshared-tab rejection, link filtering, snapshots, stale-target refusal, revocation, Jev tab/link selection, actual navigation and cross-origin refusal. Reconnect checks kill the worker with the popup closed and let a real Chrome alarm wake it, restart the entire browser using the same profile, and verify explicit revocation removes the saved pairing/alarm. Query checks cover evidence beyond the preview, continuation without duplicate passage IDs, privacy exclusions, compact output budgets, opt-in cached expansion and mutations during inference. Unit tests cover no-match/uncertainty, claim gates and malformed answers; the live fixture also tests real Jev evidence selection and missing revision evidence. It temporarily grants **only fixture-host permissions** in a copied manifest because headless tests cannot perform the popup permission gesture. Tests never touch your normal Chrome profile.
 
