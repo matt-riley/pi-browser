@@ -22,13 +22,32 @@ function renderPolicies(policies = []) {
     return item;
   }));
 }
+function renderSessions(sessions) {
+  // Several Pi sessions can be connected. A shared tab belongs to the one picked here.
+  const select = $('session');
+  const chosen = select.value;
+  select.replaceChildren(...sessions.map(({ id, label }) => {
+    const option = document.createElement('option');
+    option.value = id;
+    option.textContent = label;
+    return option;
+  }));
+  if (sessions.some(({ id }) => id === chosen)) select.value = chosen;
+  select.hidden = sessions.length < 2;
+  $('session-field').hidden = sessions.length < 2;
+}
 function render(state) {
   // Keep the popup compatible with a worker that was upgraded while it was running.
   const shares = Array.isArray(state?.shares) ? state.shares : [];
   const policies = Array.isArray(state?.policies) ? state.policies : [];
+  const sessions = Array.isArray(state?.sessions) ? state.sessions : [];
+  const owner = (Array.isArray(state?.shareSessions) ? state.shareSessions : []).find((item) => item.tabId === tab?.id);
+  const ownerLabel = sessions.find(({ id }) => id === owner?.session)?.label;
   const sharing = shares.includes(tab?.id);
+  renderSessions(sessions);
   $('status').textContent = state?.connected
-    ? `Paired with Pi · ${shares.length} shared tab(s) · ${policies.length} allowed site(s)${sharing ? ' · this tab is shared' : ''}`
+    ? `Paired with Pi · ${sessions.length || 1} session(s) · ${shares.length} shared tab(s) · ${policies.length} allowed site(s)` +
+      (sharing ? ` · this tab is shared${ownerLabel ? ` with ${ownerLabel}` : ''}` : '')
     : state?.paired ? 'Pairing saved · reconnecting to Pi automatically. No need to pair again.'
       : 'Not paired. Run /browser in Pi once to see setup details.';
   $('pairing').hidden = Boolean(state?.paired);
@@ -52,7 +71,7 @@ $('pairing').addEventListener('submit', async (event) => {
   $('token').value = '';
   await action({ type: 'pair', port: Number($('port').value), token });
 });
-$('share').addEventListener('click', () => action({ type: 'share', tabId: tab.id }));
+$('share').addEventListener('click', () => action({ type: 'share', tabId: tab.id, session: $('session').value || undefined }));
 $('revoke').addEventListener('click', () => action({ type: 'revoke', tabId: tab.id }));
 $('stop').addEventListener('click', () => action({ type: 'stop' }));
 $('policies').addEventListener('click', async (event) => {
