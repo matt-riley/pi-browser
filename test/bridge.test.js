@@ -275,3 +275,40 @@ test('when the port owner exits another session takes over without replaying in-
   assert.equal(seen.commands.length, 1, 'the in-flight click must not be replayed');
   assert.deepEqual(logs, []);
 });
+
+test('/browser stop in a joined session leaves only that session; Chrome stays paired for the rest', async (t) => {
+  const [hub, leaver, stays] = await sessionsFixture(t, 3);
+  const chrome = await connect(hub);
+  const frames = [];
+  chrome.on('message', (raw) => frames.push(JSON.parse(raw)));
+  fakeChrome(chrome);
+  assert.equal(await leaver.stop({ revoke: true }), false);
+  await waitFor(() => frames.some((frame) => frame.type === 'sessions' && frame.sessions.length === 2), 'the session to leave');
+  assert.equal(chrome.readyState, WebSocket.OPEN);
+  assert.ok(!frames.some((frame) => frame.type === 'revoke'), 'Chrome must not be told to forget pairing');
+  assert.deepEqual(await stays.request('tabs', { who: stays.session }, { timeout: 2000 }), { who: stays.session });
+  assert.equal(leaver.mode, undefined);
+});
+
+test('/browser stop in the hub hands over to another session without revoking Chrome', async (t) => {
+  const [hub, heir] = await sessionsFixture(t, 2);
+  const chrome = await connect(hub);
+  const frames = [];
+  chrome.on('message', (raw) => frames.push(JSON.parse(raw)));
+  const closed = once(chrome, 'close');
+  assert.equal(await hub.stop({ revoke: true }), false);
+  await closed;
+  assert.ok(!frames.some((frame) => frame.type === 'revoke'), 'Chrome must keep its pairing for the other sessions');
+  await waitFor(() => heir.mode === 'hub', 'the remaining session to own the port');
+  const again = await connect(heir);
+  fakeChrome(again);
+  assert.deepEqual(await heir.request('tabs', { who: heir.session }, { timeout: 2000 }), { who: heir.session });
+});
+
+test('/browser stop in the only session revokes the Chrome pairing', async (t) => {
+  const [only] = await sessionsFixture(t, 1);
+  const chrome = await connect(only);
+  const revoked = once(chrome, 'message');
+  assert.equal(await only.stop({ revoke: true }), true);
+  assert.equal(JSON.parse((await revoked)[0]).type, 'revoke');
+});

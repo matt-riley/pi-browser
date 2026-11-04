@@ -23,12 +23,13 @@ export default function (pi) {
   const result = (data) => ({ content: [{ type: 'text', text: JSON.stringify(data) }], details: data, structuredContent: data });
 
   pi.registerCommand('browser', {
-    description: 'Show browser pairing, or /browser stop|reset to revoke the session or rotate credentials',
+    description: 'Show browser pairing, /browser stop to disconnect this session, or /browser reset to rotate credentials',
     handler: async (args, ctx) => {
       const command = args.trim();
       if (command === 'stop') {
-        await bridge.stop({ revoke: true });
-        ctx.ui.notify('Browser bridge stopped and persistent pairing revoked.', 'info');
+        const revoked = await bridge.stop({ revoke: true });
+        ctx.ui.notify(revoked ? 'Browser bridge stopped and Chrome pairing revoked.'
+          : 'Browser bridge stopped for this Pi session; other Pi sessions stay connected.', 'info');
         return;
       }
       if (command === 'reset') {

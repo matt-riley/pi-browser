@@ -244,11 +244,6 @@ export class Bridge {
           }
           return true;
         }
-        if (message?.type === 'revoke') {
-          send(this.peer, { type: 'revoke' });
-          this.peer?.close(1000, 'revoked');
-          return true;
-        }
         if (message?.type === 'reset') {
           // Rotate for everyone, then take part again like any other session.
           void this.reset().then(() => this.start()).catch(() => this.scheduleRetry());
@@ -371,6 +366,8 @@ export class Bridge {
     for (const pending of [...this.pending.values()]) pending.reject(new Error(reason));
   }
 
+  // Returns true when Chrome was told to forget its pairing. /browser stop does that
+  // only in the last session; otherwise just this session leaves.
   async close({ revoke = false } = {}) {
     this.running = false;
     this.epoch++;
@@ -381,17 +378,18 @@ export class Bridge {
       this.hub = null;
       this.mode = undefined;
       this.browserConnected = false;
-      if (revoke) send(hub, { type: 'revoke' }); // The hub tells Chrome to forget pairing.
       this.rejectPending('Browser bridge stopped');
       hub?.close(1000);
       this.pairing = undefined;
       this.token = undefined;
-      return;
+      return false;
     }
-    if (!this.server) return;
+    if (!this.server) return false;
     this.rejectPending('Browser bridge stopped');
+    // With other sessions joined, Chrome stays paired and reconnects to whichever takes over.
+    const revoked = revoke && this.sessions.size === 0;
     for (const ws of this.sockets) {
-      if (revoke && !this.sessions.has(ws) && ws.readyState === WebSocket.OPEN) {
+      if (revoked && !this.sessions.has(ws) && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'revoke' }));
         ws.close(1000, 'revoked');
       } else ws.terminate(); // Joined sessions see the close and one takes the port over.
@@ -409,6 +407,7 @@ export class Bridge {
     this.wss = undefined;
     this.pairing = undefined;
     this.token = undefined;
+    return revoked;
   }
 
   async reset() {

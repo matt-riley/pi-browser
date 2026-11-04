@@ -78,7 +78,9 @@ test('Pi starts a persistent bridge; explicit pairing and shutdown clean up', as
     snapshotId: compactData.snapshotId, detail: 'evidence' });
   assert.match(expandedQuery.content[0].text, /TITLE-DO-NOT-ECHO/);
   const closed = once(ws, 'close');
-  await commands.get('browser').handler('stop', ctx);
+  let stopped;
+  await commands.get('browser').handler('stop', { ...ctx, ui: { ...ctx.ui, notify: (message) => { stopped = message; } } });
+  assert.match(stopped, /Chrome pairing revoked/);
   await closed;
   await assert.rejects(tools.get('browser_tabs').execute('2', {}, undefined), /disconnected/);
   // A new factory can be loaded while the old runtime still owns the saved port.
@@ -97,6 +99,19 @@ test('Pi starts a persistent bridge; explicit pairing and shutdown clean up', as
   await nextCommands.get('browser').handler('', ctx);
   assert.equal(Number(title.match(/Port: (\d+)/)[1]), reloadPort);
   assert.equal(title.match(/Token: ([a-f0-9]{64})/)[1], token);
+  // /browser stop in one session leaves the others connected.
+  const thirdEvents = new Map();
+  const thirdCommands = new Map();
+  register({ registerTool() {}, registerCommand: (name, command) => thirdCommands.set(name, command),
+    on: (name, handler) => thirdEvents.set(name, handler) });
+  t.after(() => thirdEvents.get('session_shutdown')());
+  await thirdEvents.get('session_start')({}, ctx);
+  let notice;
+  await thirdCommands.get('browser').handler('stop', { ...ctx, ui: { ...ctx.ui, notify: (message) => { notice = message; } } });
+  assert.match(notice, /this Pi session.*other Pi sessions stay connected/);
+  title = undefined;
+  await nextCommands.get('browser').handler('', ctx);
+  assert.equal(title.match(/Token: ([a-f0-9]{64})/)[1], token, 'the other session keeps the same pairing');
   // When the owner exits, the joined session takes the port over quietly.
   await events.get('session_shutdown')();
   await nextEvents.get('session_start')({}, ctx);
