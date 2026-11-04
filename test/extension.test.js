@@ -109,6 +109,11 @@ test('Pi starts a persistent bridge; explicit pairing and shutdown clean up', as
   let notice;
   await thirdCommands.get('browser').handler('stop', { ...ctx, ui: { ...ctx.ui, notify: (message) => { notice = message; } } });
   assert.match(notice, /this Pi session.*other Pi sessions stay connected/);
+  // /browser reset refuses while another session is connected, and says why.
+  let refusal;
+  await nextCommands.get('browser').handler('reset', { ...ctx, ui: { ...ctx.ui, notify: (message, level) => { refusal = [message, level]; } } });
+  assert.match(refusal[0], /Other Pi sessions are connected.*Run \/browser stop in them first, then reset/);
+  assert.equal(refusal[1], 'info');
   title = undefined;
   await nextCommands.get('browser').handler('', ctx);
   assert.equal(title.match(/Token: ([a-f0-9]{64})/)[1], token, 'the other session keeps the same pairing');
@@ -118,6 +123,12 @@ test('Pi starts a persistent bridge; explicit pairing and shutdown clean up', as
   await nextCommands.get('browser').handler('', ctx);
   assert.equal(Number(title.match(/Port: (\d+)/)[1]), reloadPort);
   assert.equal(title.match(/Token: ([a-f0-9]{64})/)[1], token);
-  await nextCommands.get('browser').handler('reset', ctx);
+  // Once it is the only session left, reset works. The takeover is asynchronous, so allow it a moment.
+  let resetNotice;
+  for (let attempt = 0; attempt < 40 && !/credentials reset/.test(resetNotice ?? ''); attempt++) {
+    if (attempt) await new Promise((resolve) => setTimeout(resolve, 50));
+    await nextCommands.get('browser').handler('reset', { ...ctx, ui: { ...ctx.ui, notify: (message) => { resetNotice = message; } } });
+  }
+  assert.match(resetNotice, /credentials reset/);
   await events.get('session_shutdown')();
 });

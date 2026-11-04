@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
@@ -311,4 +311,41 @@ test('/browser stop in the only session revokes the Chrome pairing', async (t) =
   const revoked = once(chrome, 'message');
   assert.equal(await only.stop({ revoke: true }), true);
   assert.equal(JSON.parse((await revoked)[0]).type, 'revoke');
+});
+
+test('/browser reset refuses while other sessions are connected and changes nothing', async (t) => {
+  const [hub, other] = await sessionsFixture(t, 2);
+  const chrome = await connect(hub);
+  const frames = [];
+  chrome.on('message', (raw) => frames.push(JSON.parse(raw)));
+  fakeChrome(chrome);
+  const { token, port } = hub.pairing;
+  const saved = await readFile(hub.statePath, 'utf8');
+  for (const session of [hub, other]) {
+    const result = await session.reset();
+    assert.equal(result.reset, false);
+    assert.match(result.message, /Other Pi sessions are connected.*Run \/browser stop in them first, then reset/);
+  }
+  assert.match((await hub.reset()).message, /\(1\)/);
+  assert.equal(await readFile(hub.statePath, 'utf8'), saved, 'the token must not change');
+  assert.deepEqual(hub.pairing, { token, port });
+  assert.equal(hub.mode, 'hub');
+  assert.equal(other.mode, 'client');
+  assert.equal(chrome.readyState, WebSocket.OPEN);
+  assert.ok(!frames.some((frame) => frame.type === 'revoke'), 'Chrome must not be told to forget pairing');
+  for (const session of [hub, other]) {
+    assert.deepEqual(await session.request('tabs', { who: session.session }, { timeout: 2000 }), { who: session.session });
+  }
+});
+
+test('/browser reset in the only session rotates the token and revokes Chrome', async (t) => {
+  const [only] = await sessionsFixture(t, 1);
+  const chrome = await connect(only);
+  const { token } = only.pairing;
+  const revoked = once(chrome, 'message');
+  assert.equal((await only.reset()).reset, true);
+  assert.equal(JSON.parse((await revoked)[0]).type, 'revoke');
+  await assert.rejects(readFile(only.statePath, 'utf8'), { code: 'ENOENT' });
+  await only.start();
+  assert.notEqual(only.pairing.token, token);
 });
