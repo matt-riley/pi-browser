@@ -287,8 +287,9 @@ test('MV3 bridge → shared tabs → DOM → Jev selection → approved click, w
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   assert.equal(reconnected.result.connected, true);
-  // Losing the Pi connection drops shares, and no site list brings them back.
-  assert.deepEqual(await bridge.request('tabs'), []);
+  // Shares outlast a dropped Pi connection: Chrome keeps them while it reconnects.
+  assert.equal((await bridge.request('tabs'))[0].tabId, tabId);
+  assert.equal(await worker.evaluate((id) => chrome.action.getBadgeText({ tabId: id }), tabId), 'ON');
   await popup.getByRole('button', { name: 'Disconnect & stop all' }).click();
   await popup.waitForFunction(() => document.getElementById('status').textContent.includes('Not paired'));
   assert.equal(await worker.evaluate((id) => chrome.action.getBadgeText({ tabId: id }), tabId), '');
@@ -434,4 +435,15 @@ test('several Pi sessions share one Chrome pairing, and every session can use ev
   assert.match((await alpha.request('read', { tabId: tabB })).title, /Page \/b/);
   await popup.reload();
   await popup.waitForFunction(() => document.getElementById('status').textContent.includes('2 session(s)'));
+
+  // When the hub's session exits, another takes the port over and the shares carry on.
+  assert.equal(alpha.mode, 'hub');
+  await alpha.stop();
+  const until = Date.now() + 15_000;
+  while (!(gamma.mode === 'hub' && gamma.browserReady()) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(gamma.mode, 'hub');
+  assert.ok(gamma.browserReady(), 'Chrome must reconnect to the new hub');
+  assert.deepEqual((await gamma.request('tabs')).map((tab) => tab.tabId), [tabA, tabB]);
+  assert.match((await gamma.request('read', { tabId: tabA })).title, /Page \/a/);
+  assert.deepEqual((await ok({ type: 'status' })).shares, [tabA, tabB]);
 });

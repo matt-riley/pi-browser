@@ -38,7 +38,7 @@ Reconnect normally takes seconds. A stopped Chrome worker is woken by a one-minu
 - The first session to start owns the port (the *hub*). It holds the Chrome connection.
 - Later sessions see the port is busy and **join the hub** over the same WebSocket port, on the `/pi` path, using the saved token. They don't warn or log while they do it.
 - The hub relays each session's commands to Chrome and sends results back to the session that asked.
-- If the hub's session exits or reloads, a remaining session **takes the port over** quietly and Chrome reconnects to it. Commands that were in flight fail with *Browser disconnected* and are never replayed. Read before retrying.
+- If the hub's session exits or reloads, a remaining session **takes the port over** quietly and Chrome reconnects to it. Shared tabs stay shared through the handover. Commands that were in flight fail with *Browser disconnected* and are never replayed. Read before retrying.
 - `/browser` in any session shows the same port and token. `/browser stop` in any session revokes the Chrome pairing. `/browser reset` in any session rotates the token for every session.
 
 **Every session can use every tab you share**, including sessions that join later. There's no per-session sharing:

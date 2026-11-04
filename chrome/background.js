@@ -46,7 +46,9 @@ function dropTab(tabId) {
 function cancelRequests() {
   for (const request of requests.values()) request.cancelled = true;
 }
-function disconnect({ reconnect = false } = {}) {
+// Shares outlast a lost Pi connection that will reconnect, for example when the hub's
+// session exits and another takes the port over. Stopping or re-pairing drops them.
+function disconnect({ reconnect = false, keepShares = false } = {}) {
   controlEpoch++;
   connected = false;
   clearInterval(heartbeat);
@@ -55,7 +57,7 @@ function disconnect({ reconnect = false } = {}) {
   const old = socket;
   socket = null;
   sessions = [];
-  for (const id of [...shared.keys()]) dropTab(id);
+  if (!keepShares) for (const id of [...shared.keys()]) dropTab(id);
   cancelRequests();
   old?.close();
   if (reconnect) scheduleReconnect();
@@ -67,7 +69,7 @@ function socketClosed(ws, shouldReconnect) {
   clearInterval(heartbeat);
   socket = null;
   sessions = [];
-  for (const id of [...shared.keys()]) dropTab(id);
+  if (!shouldReconnect) for (const id of [...shared.keys()]) dropTab(id);
   cancelRequests();
   if (shouldReconnect) scheduleReconnect();
 }
@@ -87,7 +89,7 @@ async function pair(port, token, { automatic = false } = {}) {
   if (!Number.isInteger(port) || port < 1 || port > 65535 || !TOKEN.test(token ?? '')) {
     throw new Error('Enter the port and 64-character token shown by /browser');
   }
-  disconnect();
+  disconnect({ keepShares: automatic });
   const ws = new WebSocket(`ws://127.0.0.1:${port}/browser`);
   socket = ws;
   await new Promise((resolve, reject) => {
@@ -107,7 +109,7 @@ async function pair(port, token, { automatic = false } = {}) {
         sessions = validSessions(message.sessions);
         clearTimeout(timer);
         heartbeat = setInterval(() => {
-          if (Date.now() - lastPong > 45_000) { disconnect({ reconnect: true }); return; }
+          if (Date.now() - lastPong > 45_000) { disconnect({ reconnect: true, keepShares: true }); return; }
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
         }, 20_000);
         try {
