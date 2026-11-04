@@ -25,7 +25,7 @@ pi -e ./src/index.js
 2. In Pi, run **`/browser`** once. Copy the port and pairing token from its dialog into the Chrome extension popup, then select **Pair with Pi**. The token is shown only in command UI, not returned to the model.
 3. On a tab you want Pi to use, open the extension popup and select **Share this tab**. Opening the popup is what gives the extension access to that tab; it has no access to any site otherwise.
 4. Ask Pi about the tab. It can list shared tabs, read them, query them, and use Jev to choose an eligible link. Every click asks you in Pi first.
-5. Use **Stop sharing this tab** to take a tab back. Use the popup's **Disconnect & stop all** or **`/browser reset`** to revoke persistent pairing. **`/browser stop`** disconnects just the session you run it in, and revokes the pairing only if no other Pi session is connected.
+5. Use **Stop sharing this tab** to take a tab back. Use the popup's **Disconnect & stop all** to revoke persistent pairing, or **`/browser reset`** to also rotate the token (only when no other Pi session is connected). **`/browser stop`** disconnects just the session you run it in, and revokes the pairing only if no other Pi session is connected.
 
 Pairing persists across Pi reloads, Chrome worker restarts and browser restarts, so you only pair once. Shared tabs don't persist: sharing ends when you stop it, close the tab, move the tab to another site, or Chrome restarts the extension. Links within the same site keep the tab shared. The popup hides setup once paired and distinguishes **pairing saved / reconnecting** from **not paired**.
 
@@ -39,7 +39,7 @@ Reconnect normally takes seconds. A stopped Chrome worker is woken by a one-minu
 - Later sessions see the port is busy and **join the hub** over the same WebSocket port, on the `/pi` path, using the saved token. They don't warn or log while they do it.
 - The hub relays each session's commands to Chrome and sends results back to the session that asked.
 - If the hub's session exits or reloads, a remaining session **takes the port over** quietly and Chrome reconnects to it. Shared tabs stay shared through the handover. Commands that were in flight fail with *Browser disconnected* and are never replayed. Read before retrying.
-- `/browser` in any session shows the same port and token. `/browser stop` disconnects only the session that runs it; the others stay connected and Chrome stays paired. In the last connected session it also revokes the Chrome pairing. `/browser reset` still rotates the token for **every** session and Chrome must pair again: all sessions and Chrome share one token, so a new token can't apply to one session alone.
+- `/browser` in any session shows the same port and token. `/browser stop` disconnects only the session that runs it; the others stay connected and Chrome stays paired. In the last connected session it also revokes the Chrome pairing. `/browser reset` refuses while any other Pi session is connected: all sessions and Chrome share one token, so a new token would cut the others off. It changes nothing and says how many other sessions are connected; run `/browser stop` in them first. In the only session, it rotates the token and Chrome must pair again.
 
 **Every session can use every tab you share**, including sessions that join later. There's no per-session sharing:
 
@@ -99,7 +99,7 @@ browser_query({ tabId: 123, question: 'Which head has passed checks?',
 ## Boundaries and safety
 
 - The bridge listens only on loopback. Persistent pairing uses a stable local port and a credential file at `~/.pi/pi-browser/credentials.json` with restrictive permissions by default. Set `PI_BROWSER_STATE_PATH` to change it. `/browser reset` rotates the credential.
-- The Chrome extension stores the paired port/token in `chrome.storage.local` and reconnects automatically when Pi is available. The `alarms` permission provides worker wakeups; it grants no site access. `/browser stop` in the last connected session, and `/browser reset` in any session, send an explicit revoke to a connected companion; the companion clears its profile and alarm. Use the popup's stop button to forget pairing when Pi is offline.
+- The Chrome extension stores the paired port/token in `chrome.storage.local` and reconnects automatically when Pi is available. The `alarms` permission provides worker wakeups; it grants no site access. `/browser stop` in the last connected session, and `/browser reset` (which only runs when no other session is connected), send an explicit revoke to a connected companion; the companion clears its profile and alarm. Use the popup's stop button to forget pairing when Pi is offline.
 - The extension has no site permissions. It reaches a tab only through Chrome's `activeTab`, which you grant by opening the popup on that tab, and only after you select **Share this tab**. The model can't share tabs, open tabs or navigate to new URLs.
 - **Every click asks you first**, in the Pi session that wants to click. A Pi session with no interactive UI can't click at all; it says so before reading the page or calling Jev. Jev confidence never grants authorization.
 - Only rendered HTTP(S), same-origin anchor links are eligible. Downloads, new-window links, buttons, form submissions, arbitrary scripts, and other URL schemes are excluded.

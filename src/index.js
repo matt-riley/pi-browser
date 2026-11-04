@@ -33,8 +33,8 @@ export default function (pi) {
         return;
       }
       if (command === 'reset') {
-        await bridge.reset();
-        ctx.ui.notify('Browser pairing credentials reset. Run /browser to pair again.', 'info');
+        const { reset, message } = await bridge.reset();
+        ctx.ui.notify(reset ? 'Browser pairing credentials reset. Run /browser to pair again.' : message, 'info');
         return;
       }
       if (!ctx.hasUI) throw new Error('Pairing setup/status requires a user interface');

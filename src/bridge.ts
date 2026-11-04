@@ -244,11 +244,6 @@ export class Bridge {
           }
           return true;
         }
-        if (message?.type === 'reset') {
-          // Rotate for everyone, then take part again like any other session.
-          void this.reset().then(() => this.start()).catch(() => this.scheduleRetry());
-          return true;
-        }
         return false;
       },
       closed: () => {
@@ -410,13 +405,13 @@ export class Bridge {
     return revoked;
   }
 
+  // Every session and Chrome share one token, so a new token would cut off the
+  // others. Refuse while any other session is connected; change nothing.
   async reset() {
     return this.transition(async () => {
-      if (this.mode === 'client') {
-        // The port owner revokes Chrome and rotates the token for every session.
-        send(this.hub, { type: 'reset' });
-        await this.close();
-        return;
+      const others = this.mode === 'client' ? '' : this.sessions.size ? ` (${this.sessions.size})` : null;
+      if (others !== null) {
+        return { reset: false, message: `Other Pi sessions are connected${others}. Run /browser stop in them first, then reset.` };
       }
       // Remove the credential before releasing the port, so a session that takes
       // the port over creates a fresh token instead of saving the old one again.
@@ -426,6 +421,7 @@ export class Bridge {
         }
       }
       await this.close({ revoke: true });
+      return { reset: true };
     });
   }
 }
