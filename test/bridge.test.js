@@ -14,7 +14,8 @@ export async function connect(bridge, { token = bridge.pairing.token, headers = 
   if (sendPair) {
     const message = once(ws, 'message');
     ws.send(JSON.stringify({ type: 'pair', token }));
-    assert.equal(JSON.parse((await message)[0]).type, 'paired');
+    ws.paired = JSON.parse((await message)[0]);
+    assert.equal(ws.paired.type, 'paired');
   }
   return ws;
 }
@@ -152,4 +153,124 @@ test('disconnect and stop reject pending calls, and restarting rotates the secre
   const rejection = assert.rejects(next, /stopped/);
   await bridge.stop();
   await rejection;
+});
+
+// Several Pi sessions share one saved port: the first binds it, the rest join it.
+async function sessionsFixture(t, count = 3) {
+  const directory = await mkdtemp(join(tmpdir(), 'pi-browser-sessions-'));
+  const statePath = join(directory, 'credentials.json');
+  const bridges = [];
+  t.after(async () => {
+    for (const bridge of bridges) await bridge.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const first = new Bridge({ persistent: true, statePath, port: 0 });
+  bridges.push(first);
+  await first.start();
+  for (let i = 1; i < count; i++) {
+    const next = new Bridge({ persistent: true, statePath, port: first.pairing.port });
+    bridges.push(next);
+    await next.start();
+  }
+  return bridges;
+}
+async function waitFor(check, what, ms = 4000) {
+  const until = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > until) throw new Error(`Timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+function fakeChrome(ws, { reply = true } = {}) {
+  const seen = { commands: [], cancels: [], sessions: [] };
+  ws.on('message', (raw) => {
+    const message = JSON.parse(raw);
+    if (message.type === 'sessions') seen.sessions.push(message.sessions);
+    if (message.type === 'cancel') seen.cancels.push(message.id);
+    if (message.type !== 'command') return;
+    seen.commands.push(message);
+    if (reply) ws.send(JSON.stringify({ type: 'result', id: message.id, result: { session: message.session } }));
+  });
+  return seen;
+}
+function quiet(t) {
+  const lines = [];
+  for (const name of ['log', 'warn', 'error']) {
+    const original = console[name];
+    console[name] = (...args) => lines.push(args.join(' '));
+    t.after(() => { console[name] = original; });
+  }
+  return lines;
+}
+
+test('several Pi sessions connect at once, each gets its own replies, and nothing is evicted or logged', async (t) => {
+  const logs = quiet(t);
+  const bridges = await sessionsFixture(t, 3);
+  assert.equal(new Set(bridges.map((bridge) => bridge.pairing.port)).size, 1);
+  assert.equal(new Set(bridges.map((bridge) => bridge.pairing.token)).size, 1);
+  const chrome = await connect(bridges[0]);
+  const seen = fakeChrome(chrome);
+  const results = await Promise.all(bridges.map((bridge) => bridge.request('tabs', {}, { timeout: 2000 })));
+  assert.deepEqual(results.map((result) => result.session), bridges.map((bridge) => bridge.session));
+  assert.equal(new Set(results.map((result) => result.session)).size, 3);
+  assert.equal(chrome.readyState, WebSocket.OPEN, 'Chrome must not be evicted by other sessions');
+  const announced = seen.sessions.at(-1) ?? chrome.paired.sessions;
+  assert.deepEqual(announced.map((session) => session.id).sort(), bridges.map((bridge) => bridge.session).sort());
+  assert.ok(announced.every((session) => typeof session.label === 'string' && session.label.length > 0));
+  assert.ok(bridges.every((bridge) => bridge.browserReady()));
+  assert.deepEqual(logs, []);
+});
+
+test('a joining session cannot reuse another session id or skip the token', async (t) => {
+  const [hub] = await sessionsFixture(t, 1);
+  for (const join of [{ type: 'join', token: hub.pairing.token, session: hub.session, label: 'spoof' },
+    { type: 'join', token: '0'.repeat(64), session: 'other', label: 'bad token' }]) {
+    const ws = new WebSocket(`ws://127.0.0.1:${hub.pairing.port}/pi`);
+    await once(ws, 'open');
+    const closed = once(ws, 'close');
+    ws.send(JSON.stringify(join));
+    assert.equal((await closed)[0], 1008);
+  }
+  // Web pages always send an Origin header, so they cannot use the Pi path.
+  const page = new WebSocket(`ws://127.0.0.1:${hub.pairing.port}/pi`, { origin: 'https://evil.example' });
+  await once(page, 'error');
+});
+
+test('closing one session cancels only its in-flight commands and leaves the others working', async (t) => {
+  const [hub, left, stays] = await sessionsFixture(t, 3);
+  const chrome = await connect(hub);
+  const seen = fakeChrome(chrome, { reply: false });
+  const pending = left.request('click', {}, { timeout: 2000 });
+  const rejection = assert.rejects(pending, /disconnected|stopped/);
+  await waitFor(() => seen.commands.length === 1, 'the click to reach Chrome');
+  await left.stop();
+  await rejection;
+  await waitFor(() => seen.cancels.includes(seen.commands[0].id), 'Chrome to get a cancel');
+  await waitFor(() => seen.sessions.at(-1)?.length === 2, 'the closed session to leave');
+  const kept = stays.request('tabs', {}, { timeout: 2000 });
+  await waitFor(() => seen.commands.length === 2, 'the remaining session to reach Chrome');
+  chrome.send(JSON.stringify({ type: 'result', id: seen.commands[1].id, result: 'ok' }));
+  assert.equal(await kept, 'ok');
+  assert.equal(seen.commands[1].session, stays.session);
+});
+
+test('when the port owner exits another session takes over without replaying in-flight actions', async (t) => {
+  const logs = quiet(t);
+  const [hub, heir] = await sessionsFixture(t, 2);
+  const chrome = await connect(hub);
+  const seen = fakeChrome(chrome, { reply: false });
+  const pending = heir.request('click', {}, { timeout: 4000 });
+  const rejection = assert.rejects(pending, /disconnected/);
+  await waitFor(() => seen.commands.length === 1, 'the click to reach Chrome');
+  const closed = once(chrome, 'close');
+  await hub.stop();
+  await rejection;
+  await closed;
+  await waitFor(() => heir.mode === 'hub', 'the remaining session to own the port');
+  assert.equal(heir.pairing.port, hub.pairing?.port ?? heir.pairing.port);
+  const again = await connect(heir);
+  fakeChrome(again);
+  assert.deepEqual(await heir.request('tabs', {}, { timeout: 2000 }), { session: heir.session });
+  assert.equal(seen.commands.length, 1, 'the in-flight click must not be replayed');
+  assert.deepEqual(logs, []);
 });

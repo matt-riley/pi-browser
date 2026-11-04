@@ -86,10 +86,14 @@ test('Pi starts a persistent bridge; explicit pairing and shutdown clean up', as
   register({ registerTool() {}, registerCommand: (name, command) => nextCommands.set(name, command),
     on: (name, handler) => nextEvents.set(name, handler) });
   t.after(() => nextEvents.get('session_shutdown')());
-  // Even a real port conflict must be retryable, not poison this runtime permanently.
+  // A second Pi session joins the session that owns the port instead of failing noisily.
   let warning;
   await nextEvents.get('session_start')({}, { ui: { notify: (message) => { warning = message; } } });
-  assert.match(warning, /EADDRINUSE/);
+  assert.equal(warning, undefined);
+  await nextCommands.get('browser').handler('', ctx);
+  assert.equal(Number(title.match(/Port: (\d+)/)[1]), reloadPort);
+  assert.equal(title.match(/Token: ([a-f0-9]{64})/)[1], token);
+  // When the owner exits, the joined session takes the port over quietly.
   await events.get('session_shutdown')();
   await nextEvents.get('session_start')({}, ctx);
   await nextCommands.get('browser').handler('', ctx);
