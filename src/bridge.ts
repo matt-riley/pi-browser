@@ -177,7 +177,7 @@ export class Bridge {
     return [{ id: this.session, label: this.label }, ...this.sessions.values()];
   }
 
-  // Chrome learns which sessions exist so it can keep each session's tabs apart.
+  // Chrome learns which sessions exist so the popup can show them.
   tellChrome() { send(this.peer, { type: 'sessions', sessions: this.sessionList() }); }
   tellSessions() {
     for (const ws of this.sessions.keys()) send(ws, { type: 'browser', connected: this.peer !== null });
@@ -234,9 +234,7 @@ export class Bridge {
             return true;
           }
           this.routes.set(id, ws);
-          // The hub stamps the session, so one session cannot speak for another.
-          send(this.peer, { type: 'command', id, op: message.op, args: message.args,
-            expiresAt: message.expiresAt, session: this.sessions.get(ws).id });
+          send(this.peer, { type: 'command', id, op: message.op, args: message.args, expiresAt: message.expiresAt });
           return true;
         }
         if (message?.type === 'cancel' && typeof message.id === 'string') {
@@ -365,8 +363,7 @@ export class Bridge {
         reject: (error) => finish(reject, error),
       });
       signal?.addEventListener('abort', abort, { once: true });
-      target.send(JSON.stringify({ type: 'command', id, op, args, expiresAt: Date.now() + timeout,
-        ...(this.mode === 'hub' ? { session: this.session } : {}) }));
+      target.send(JSON.stringify({ type: 'command', id, op, args, expiresAt: Date.now() + timeout }));
     });
   }
 

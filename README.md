@@ -37,18 +37,18 @@ Reconnect normally takes seconds. A stopped Chrome worker is woken by a one-minu
 
 - The first session to start owns the port (the *hub*). It holds the Chrome connection.
 - Later sessions see the port is busy and **join the hub** over the same WebSocket port, on the `/pi` path, using the saved token. They don't warn or log while they do it.
-- The hub relays each session's commands to Chrome, stamps them with that session's ID, and sends results back to the right session.
+- The hub relays each session's commands to Chrome and sends results back to the session that asked.
 - If the hub's session exits or reloads, a remaining session **takes the port over** quietly and Chrome reconnects to it. Commands that were in flight fail with *Browser disconnected* and are never replayed. Read before retrying.
 - `/browser` in any session shows the same port and token. `/browser stop` in any session revokes the Chrome pairing. `/browser reset` in any session rotates the token for every session.
 
-Each session only sees its own tabs:
+**Every session can use every tab you share**, including sessions that join later. There's no per-session sharing:
 
 | Tab | Who can use it |
 | --- | --- |
-| Shared with **Share this tab** | The session picked in the popup's **Share with Pi session** list. The list appears only when two or more sessions are connected; with one session the tab goes to that session. |
+| Shared with **Share this tab** | Every connected Pi session. |
 | Any tab you haven't shared | No session. |
 
-Another session gets *Tab is shared with another Pi session* and never sees the tab in `browser_tabs`. When a session ends, Chrome drops the tabs it owned. Click approvals appear in the session that asked for the click.
+When a session ends, the tabs you shared stay shared with the others. Click approvals appear in the session that asked for the click.
 
 Keep `PI_BROWSER_STATE_PATH` and port overrides the same in every session, or sessions can't find each other. If `/browser` says the port is busy and not answering as a Pi browser bridge, another program holds it; set `PI_BROWSER_PORT` to a free port. Port `0` is for isolated tests, not persistent daily use.
 
@@ -141,7 +141,7 @@ npm run test:live                # Same fixture, real Jev; requires key and cost
 npm run test:pi                  # Installed Pi changed-helper reload/pairing/stop regression; no model calls
 ```
 
-Unit tests also connect several Pi sessions at once with a fake Chrome peer. They check that every session gets its own replies, nothing is evicted, a session can't join under another session's ID, a leaving session's in-flight commands are cancelled, the port is taken over when its owner exits, and nothing is logged. A second browser fixture pairs real Chromium with two sessions and checks tab isolation, the popup's session picker, and cleanup when a session ends.
+Unit tests also connect several Pi sessions at once with a fake Chrome peer. They check that every session gets its own replies, nothing is evicted, a session can't join under another session's ID, a leaving session's in-flight commands are cancelled, the port is taken over when its owner exits, and nothing is logged. A second browser fixture pairs real Chromium with several sessions and checks that every session, including one that joins later, can use every shared tab, that no session can use a tab nobody shared, and that shares outlast a session that ends.
 
 The browser fixture loads the shipped manifest with no host permissions and opens the popup on each tab through Chrome's extension action, so access comes only from `activeTab`. It checks pairing, persistent reconnect, unshared-tab rejection, that same-site clicks keep a tab shared and a move to another site ends sharing, link filtering, snapshots, stale-target refusal, revocation, Jev tab/link selection, actual navigation and cross-origin refusal. Reconnect checks kill the worker with the popup closed and let a real Chrome alarm wake it, restart the entire browser using the same profile, and verify explicit revocation removes the saved pairing/alarm. Query checks cover evidence beyond the preview, continuation without duplicate passage IDs, privacy exclusions, compact output budgets, opt-in cached expansion and mutations during inference. Unit tests cover no-match/uncertainty, claim gates and malformed answers; the live fixture also tests real Jev evidence selection and missing revision evidence. Tests never touch your normal Chrome profile.
 

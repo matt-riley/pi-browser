@@ -321,7 +321,7 @@ test('MV3 bridge → shared tabs → DOM → Jev selection → approved click, w
   const checkPopup = await context.newPage();
   await checkPopup.goto(`chrome-extension://${id}/popup.html`);
   const restarted = await checkPopup.evaluate(() => chrome.runtime.sendMessage({ type: 'status' }));
-  assert.deepEqual(restarted.result, { connected: true, paired: true, shares: [], sessions: [{ id: bridge.session, label: bridge.label }], shareSessions: [] });
+  assert.deepEqual(restarted.result, { connected: true, paired: true, shares: [], sessions: [{ id: bridge.session, label: bridge.label }] });
   assert.equal(await checkPopup.locator('#pairing').isVisible(), false);
   // A worker restart drops shares; there is no site list to bring them back.
   assert.deepEqual(await bridge.request('tabs'), []);
@@ -345,7 +345,7 @@ test('MV3 bridge → shared tabs → DOM → Jev selection → approved click, w
   assert.equal(bridge.peer, null);
 });
 
-test('several Pi sessions share one Chrome pairing, and each session only sees its own tabs', { timeout: 60_000 }, async (t) => {
+test('several Pi sessions share one Chrome pairing, and every session can use every shared tab', { timeout: 60_000 }, async (t) => {
   const server = createServer((req, res) => {
     res.setHeader('Content-Type', 'text/html');
     res.end(`<!doctype html><title>Page ${req.url}</title><h1>Page ${req.url}</h1><a href="/">Home</a>`);
@@ -396,20 +396,20 @@ test('several Pi sessions share one Chrome pairing, and each session only sees i
   const tabB = await tabIdOf(`${base}/b`);
   const tabC = await tabIdOf(`${base}/c`);
 
-  // With several sessions the popup must say which session gets the tab.
-  assert.match((await ui({ type: 'share', tabId: tabA })).error, /Choose which Pi session/);
-  await ok({ type: 'share', tabId: tabA, session: alpha.session });
-  const shared = await ok({ type: 'share', tabId: tabB, session: beta.session });
-  assert.deepEqual(shared.shareSessions, [{ tabId: tabA, session: alpha.session }, { tabId: tabB, session: beta.session }]);
+  // There is no session picker: a tab shared from the popup is usable by every session.
+  assert.equal(await popup.locator('#session').count(), 0);
+  await ok({ type: 'share', tabId: tabA });
+  const shared = await ok({ type: 'share', tabId: tabB });
+  assert.deepEqual(shared.shares, [tabA, tabB]);
+  assert.equal(shared.shareSessions, undefined);
 
-  // Both sessions work at the same time, and each sees only its own tabs.
+  // Both sessions work at the same time and both see both tabs.
   const [alphaTabs, betaTabs] = await Promise.all([alpha.request('tabs'), beta.request('tabs')]);
-  assert.deepEqual(alphaTabs.map((tab) => tab.tabId), [tabA]);
-  assert.deepEqual(betaTabs.map((tab) => tab.tabId), [tabB]);
-  assert.match((await alpha.request('read', { tabId: tabA })).title, /Page \/a/);
-  assert.match((await beta.request('read', { tabId: tabB })).title, /Page \/b/);
-  await assert.rejects(beta.request('read', { tabId: tabA }), /another Pi session/);
-  await assert.rejects(alpha.request('candidates', { tabId: tabB, goal: 'Home' }), /another Pi session/);
+  assert.deepEqual(alphaTabs.map((tab) => tab.tabId), [tabA, tabB]);
+  assert.deepEqual(betaTabs.map((tab) => tab.tabId), [tabA, tabB]);
+  assert.match((await beta.request('read', { tabId: tabA })).title, /Page \/a/);
+  assert.match((await alpha.request('read', { tabId: tabB })).title, /Page \/b/);
+  assert.equal((await alpha.request('candidates', { tabId: tabB, goal: 'Home' })).candidates[0].label, 'Home');
 
   // A tab on the same site that nobody shared is usable by no session, and Pi can't open tabs.
   for (const session of [alpha, beta]) {
@@ -418,20 +418,20 @@ test('several Pi sessions share one Chrome pairing, and each session only sees i
     await assert.rejects(session.request('open', { url: `${base}/d` }), /Invalid tab ID|Unsupported/);
   }
 
-  // The popup offers a session picker only when there is a choice to make.
-  await popup.reload();
-  await popup.waitForFunction(() => document.getElementById('session').options.length === 2);
-  assert.equal(await popup.locator('#session').isVisible(), true);
+  // A session that joins later sees the tabs already shared.
+  const gamma = new Bridge({ persistent: true, statePath, port: alpha.pairing.port, label: 'gamma' });
+  t.after(() => gamma.stop());
+  await gamma.start();
+  assert.equal(gamma.mode, 'client');
+  assert.deepEqual((await gamma.request('tabs')).map((tab) => tab.tabId), [tabA, tabB]);
 
-  // When a session ends, Chrome drops its shares; the other session keeps working.
+  // When a session ends, shared tabs stay shared with the others.
   await beta.stop();
   await popup.waitForFunction(() => chrome.runtime.sendMessage({ type: 'status' })
-    .then((state) => state.result.sessions.length === 1), null, { timeout: 5000 });
-  const after = await ok({ type: 'status' });
-  assert.deepEqual(after.shareSessions, [{ tabId: tabA, session: alpha.session }]);
-  assert.equal(await worker.evaluate((tabId) => chrome.action.getBadgeText({ tabId }), tabB), '');
-  assert.match((await alpha.request('read', { tabId: tabA })).title, /Page \/a/);
+    .then((state) => state.result.sessions.length === 2), null, { timeout: 5000 });
+  assert.deepEqual((await ok({ type: 'status' })).shares, [tabA, tabB]);
+  assert.equal(await worker.evaluate((tabId) => chrome.action.getBadgeText({ tabId }), tabB), 'ON');
+  assert.match((await alpha.request('read', { tabId: tabB })).title, /Page \/b/);
   await popup.reload();
-  await popup.waitForFunction(() => document.getElementById('status').textContent.includes('1 session(s)'));
-  assert.equal(await popup.locator('#session').isVisible(), false);
+  await popup.waitForFunction(() => document.getElementById('status').textContent.includes('2 session(s)'));
 });
