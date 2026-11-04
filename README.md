@@ -12,7 +12,7 @@ No screenshots, debugger permission, cloud relay, cookie export, or second sideb
 
 ## Try it
 
-Requires Node 22.18+, Pi (tested with 0.99.2), Chrome 116+, and a TypeSafe API key.
+Requires Node 22.18+, Pi (tested with 1.5.0), Chrome 116+, and a TypeSafe API key.
 
 ```sh
 cd /path/to/pi-browser
