@@ -9,9 +9,10 @@ import { createJev } from './selection.ts';
 export default function (pi) {
   const bridge = new Bridge({ persistent: true });
   // Factories also run during discovery/reload while the old runtime may own the port.
+  // A busy port is normal: the bridge joins the session that owns it.
   pi.on('session_start', async (_event, ctx) => {
     try { await bridge.start(); } catch (error) {
-      ctx.ui.notify(`Browser bridge could not start: ${error.message}. Close the other Pi bridge, then run /browser.`, 'warning');
+      ctx.ui.notify(`Browser bridge could not start: ${error.message}. Check /browser.`, 'warning');
     }
   });
   let jev;
@@ -37,13 +38,19 @@ export default function (pi) {
         return;
       }
       if (!ctx.hasUI) throw new Error('Pairing setup/status requires a user interface');
-      const { port, token } = await bridge.start();
-      if (bridge.peer) {
-        ctx.ui.notify(`Browser connected on port ${port}. Pairing is saved; reloads do not require pairing again.`, 'info');
+      const pairing = await bridge.start();
+      if (!pairing) {
+        ctx.ui.notify(`Port ${bridge.waitingPort} is busy and is not answering as a Pi browser bridge. Retrying quietly; check PI_BROWSER_PORT and PI_BROWSER_STATE_PATH.`, 'warning');
+        return;
+      }
+      const { port, token } = pairing;
+      const shared = bridge.mode === 'client' ? ' through another Pi session' : '';
+      if (bridge.browserReady()) {
+        ctx.ui.notify(`Browser connected on port ${port}${shared}. Pairing is saved; reloads do not require pairing again.`, 'info');
         return;
       }
       // Command UI only: never send this token via a model-visible message/tool result.
-      await ctx.ui.select(`Pi Browser · port ${port}\nSaved Chrome pairing reconnects automatically. No need to pair again.\nFirst setup only — Port: ${port}\nToken: ${token}\nIf another Pi session owns this port, use that session or close it first.`, ['done']);
+      await ctx.ui.select(`Pi Browser · port ${port}\nSaved Chrome pairing reconnects automatically. No need to pair again.\nFirst setup only — Port: ${port}\nToken: ${token}\nSeveral Pi sessions can use the browser at once; they share this port and token.`, ['done']);
     },
   });
   pi.on('session_shutdown', () => bridge.stop());

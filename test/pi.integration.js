@@ -17,7 +17,7 @@ test('installed Pi reloads changed bridge helpers, retains pairing and stops wit
   const bridgePath = join(stateDir, 'src', 'bridge.ts');
   const bridgeSource = await readFile(bridgePath, 'utf8');
   const versionedBridge = (generation) => bridgeSource.replace(
-    "ws.send(JSON.stringify({ type: 'paired' }));", `ws.send(JSON.stringify({ type: 'paired', generation: '${generation}' }));`,
+    "send(ws, { type: 'paired', sessions:", `send(ws, { type: 'paired', generation: '${generation}', sessions:`,
   );
   assert.notEqual(versionedBridge('before_reload'), bridgeSource);
   await writeFile(bridgePath, versionedBridge('before_reload'));

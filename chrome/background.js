@@ -4,7 +4,12 @@ let heartbeat;
 let reconnectTimer;
 let reconnectDelay = 1000;
 let pairingProfile = null;
+// tabId -> { origin, id, policy, session }. session is the Pi session that owns
+// the tab (shared to it or opened by it), or null for a tab any session may use
+// under a site policy.
 const shared = new Map();
+// Pi sessions connected through the bridge, as announced by the port owner.
+let sessions = [];
 const policies = new Map();
 const queues = new Map();
 const requests = new Map();
@@ -12,6 +17,7 @@ let controls = Promise.resolve();
 let controlEpoch = 0;
 const ACTIONS = new Set(['read', 'navigate', 'click']);
 const TOKEN = /^[a-f0-9]{64}$/;
+const SESSION = /^[A-Za-z0-9-]{1,100}$/;
 const RECONNECT_ALARM = 'pi-browser-reconnect';
 async function ensureReconnectAlarm() {
   const alarm = await chrome.alarms.get(RECONNECT_ALARM);
@@ -25,7 +31,18 @@ function forgetPairing() {
   void chrome.alarms.clear(RECONNECT_ALARM);
   disconnect();
 }
-const status = () => ({ connected, paired: Boolean(pairingProfile), shares: [...shared.keys()], policies: policyList() });
+const status = () => ({ connected, paired: Boolean(pairingProfile), shares: [...shared.keys()], policies: policyList(),
+  sessions: sessions.map((session) => ({ ...session })),
+  shareSessions: [...shared].filter(([, grant]) => grant.session).map(([tabId, grant]) => ({ tabId, session: grant.session })) });
+const validSessions = (list) => (Array.isArray(list) ? list.slice(0, 32) : [])
+  .filter((item) => SESSION.test(item?.id ?? '') && typeof item.label === 'string')
+  .map(({ id, label }) => ({ id, label: label.slice(0, 100) }));
+function setSessions(list) {
+  sessions = validSessions(list);
+  const live = new Set(sessions.map((session) => session.id));
+  // A session that left loses its shares and the tabs it opened.
+  for (const [tabId, grant] of [...shared]) if (grant.session && !live.has(grant.session)) dropTab(tabId);
+}
 
 const badge = (tabId, text) => chrome.action.setBadgeText({ tabId, text }).catch(() => {});
 const persist = () => chrome.storage.session.set({ shares: [...shared.keys()] });
@@ -64,6 +81,7 @@ function disconnect({ reconnect = false } = {}) {
   reconnectTimer = undefined;
   const old = socket;
   socket = null;
+  sessions = [];
   for (const id of [...shared.keys()]) dropTab(id);
   cancelRequests();
   old?.close();
@@ -75,6 +93,7 @@ function socketClosed(ws, shouldReconnect) {
   connected = false;
   clearInterval(heartbeat);
   socket = null;
+  sessions = [];
   for (const id of [...shared.keys()]) dropTab(id);
   cancelRequests();
   if (shouldReconnect) scheduleReconnect();
@@ -112,6 +131,7 @@ async function pair(port, token, { automatic = false } = {}) {
         connected = true;
         reconnectDelay = 1000;
         pairingProfile = { port, token };
+        sessions = validSessions(message.sessions);
         clearTimeout(timer);
         heartbeat = setInterval(() => {
           if (Date.now() - lastPong > 45_000) { disconnect({ reconnect: true }); return; }
@@ -127,6 +147,8 @@ async function pair(port, token, { automatic = false } = {}) {
         }
       } else if (paired && message.type === 'pong') {
         lastPong = Date.now();
+      } else if (paired && message.type === 'sessions') {
+        setSessions(message.sessions);
       } else if (paired && message.type === 'revoke') {
         forgetPairing();
       } else if (paired && message.type === 'command') {
@@ -150,9 +172,10 @@ function check(request, ws) {
     throw new Error('Request cancelled, disconnected or expired');
   }
 }
-async function approvedTab(tabId, grant, action = 'read', { autoApproved = false } = {}) {
+async function approvedTab(tabId, grant, action = 'read', { autoApproved = false, session = null } = {}) {
   const current = shared.get(tabId);
   if (grant && current !== grant) throw new Error('Tab sharing revoked');
+  if (current?.session && current.session !== session) throw new Error('Tab is shared with another Pi session');
   const tab = await chrome.tabs.get(tabId);
   if (!tab.url) throw new Error('Tab has no usable URL');
   let url;
@@ -172,12 +195,13 @@ async function approvedTab(tabId, grant, action = 'read', { autoApproved = false
     return { tab, grant: active };
   }
   if (!allows(url.origin, action)) throw new Error(`Tab not shared and origin is not allowlisted for ${action}`);
-  const created = { origin: url.origin, id: crypto.randomUUID(), policy: true };
+  const created = { origin: url.origin, id: crypto.randomUUID(), policy: true, session: null };
   shared.set(tabId, created);
   await persist();
   return { tab, grant: created };
 }
-async function dom(tabId, grant, type, args, request, ws, action = 'read', options = {}) {
+async function dom(tabId, grant, type, args, request, ws, action = 'read', extra = {}) {
+  const options = { ...extra, session: request.session };
   const initial = await approvedTab(tabId, grant, action, options);
   check(request, ws);
   await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
@@ -205,14 +229,14 @@ async function observeAfterClick(tabId, grant, request, ws) {
   await new Promise((resolve) => setTimeout(resolve, 250));
   const until = Math.min(Date.now() + 5000, request.expiresAt);
   while (Date.now() < until) {
-    const { tab } = await approvedTab(tabId, grant, 'read');
+    const { tab } = await approvedTab(tabId, grant, 'read', { session: request.session });
     check(request, ws);
     if (tab.status === 'complete') return dom(tabId, grant, 'dom_summary', {}, request, ws, 'read');
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error('Page still loading; read it again later');
 }
-async function listTabs() {
+async function listTabs(session) {
   const tabs = await chrome.tabs.query({});
   const result = [];
   for (const tab of tabs) {
@@ -220,6 +244,7 @@ async function listTabs() {
     let origin;
     try { origin = new URL(tab.url).origin; } catch { continue; }
     const explicit = shared.get(tab.id);
+    if (explicit?.session && explicit.session !== session) continue; // Another session's tab.
     if ((explicit && explicit.origin === origin) || allows(origin, 'read')) {
       result.push({ tabId: tab.id, title: (tab.title ?? '').slice(0, 300), url: tab.url.slice(0, 2048) });
     }
@@ -250,7 +275,7 @@ async function run(message, request, ws) {
   check(request, ws);
   const { op, args = {} } = message;
   if (op === 'tabs') {
-    const tabs = await listTabs();
+    const tabs = await listTabs(request.session);
     check(request, ws);
     return tabs;
   }
@@ -264,6 +289,11 @@ async function run(message, request, ws) {
     }
     const tab = await chrome.tabs.create({ url: target.href, active: false });
     if (!Number.isSafeInteger(tab.id)) throw new Error('Chrome did not return a tab ID');
+    // The opening session owns the new tab; other sessions cannot see or use it.
+    if (request.session) {
+      shared.set(tab.id, { origin: target.origin, id: crypto.randomUUID(), policy: true, session: request.session });
+      await persist();
+    }
     await waitForComplete(tab.id, request, ws).catch(() => {});
     return { tabId: tab.id, url: target.href, title: (tab.title ?? '').slice(0, 300) };
   }
@@ -294,7 +324,9 @@ async function run(message, request, ws) {
 async function execute(message, ws) {
   if (typeof message.id !== 'string' || requests.has(message.id) ||
       !Number.isFinite(message.expiresAt) || message.expiresAt > Date.now() + 30_000) return;
-  const request = { expiresAt: message.expiresAt, cancelled: false };
+  // The bridge stamps the sending session; a bridge without sessions sends none.
+  const session = typeof message.session === 'string' && SESSION.test(message.session) ? message.session : null;
+  const request = { expiresAt: message.expiresAt, cancelled: false, session };
   requests.set(message.id, request);
   const key = message.args?.tabId ?? 'tabs';
   const work = (queues.get(key) ?? Promise.resolve()).catch(() => {}).then(() => run(message, request, ws));
@@ -364,9 +396,13 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       const url = new URL(tab.url);
       if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Only ordinary HTTP(S) tabs can be shared');
       if (shared.size >= 254 && !shared.has(tab.id)) throw new Error('At most 254 tabs can be shared');
+      const owner = !sessions.length ? null
+        : sessions.some((item) => item.id === message.session) ? message.session
+          : sessions.length === 1 ? sessions[0].id : undefined;
+      if (owner === undefined) throw new Error('Choose which Pi session gets this tab');
       await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
       if (!connected) throw new Error('Disconnected while sharing');
-      shared.set(tab.id, { origin: url.origin, id: crypto.randomUUID(), policy: false });
+      shared.set(tab.id, { origin: url.origin, id: crypto.randomUUID(), policy: false, session: owner });
       await badge(tab.id, 'ON');
       await persist();
     } else if (message?.type === 'revoke') dropTab(message.tabId);

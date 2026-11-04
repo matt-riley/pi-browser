@@ -3,7 +3,7 @@ body { width: 340px; padding: 16px; margin: 0; }
 h1 { font-size: 20px; margin-top: 0; }
 h2 { font-size: 16px; margin-bottom: 4px; }
 label { display: block; margin-top: 10px; }
-input, button { box-sizing: border-box; width: 100%; padding: 9px; margin-top: 6px; font: inherit; }
+input, select, button { box-sizing: border-box; width: 100%; padding: 9px; margin-top: 6px; font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: default; }
 .danger { border: 2px solid #b42318; }
@@ -16,3 +16,4 @@ fieldset input { width: auto; margin-right: 6px; }
 #policies { padding-left: 20px; }
 #policies li { margin: 8px 0; overflow-wrap: anywhere; }
 #policies button { width: auto; padding: 4px 8px; margin-left: 4px; }
+[hidden] { display: none; }

@@ -305,7 +305,7 @@ test('MV3 bridge → shared tabs → DOM → Jev selection → approved click, w
   const restarted = await checkPopup.evaluate(() => chrome.runtime.sendMessage({ type: 'status' }));
   assert.deepEqual(restarted.result, { connected: true, paired: true, shares: [], policies: [{
     origin: new URL(base).origin, actions: ['click', 'navigate', 'read'],
-  }] });
+  }], sessions: [{ id: bridge.session, label: bridge.label }], shareSessions: [] });
   assert.equal(await checkPopup.locator('#pairing').isVisible(), false);
   assert.equal((await bridge.request('tabs'))[0].tabId, tabId);
 
@@ -329,4 +329,96 @@ test('MV3 bridge → shared tabs → DOM → Jev selection → approved click, w
   await bridge.start();
   await new Promise((resolve) => setTimeout(resolve, 1500));
   assert.equal(bridge.peer, null);
+});
+
+test('several Pi sessions share one Chrome pairing, and each session only sees its own tabs', { timeout: 60_000 }, async (t) => {
+  const server = createServer((req, res) => {
+    res.setHeader('Content-Type', 'text/html');
+    res.end(`<!doctype html><title>Page ${req.url}</title><h1>Page ${req.url}</h1><a href="/">Home</a>`);
+  }).listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const temp = await mkdtemp(join(tmpdir(), 'pi-browser-sessions-'));
+  const extension = join(temp, 'chrome');
+  await cp(resolve('chrome'), extension, { recursive: true });
+  const manifest = JSON.parse(await readFile(join(extension, 'manifest.json'), 'utf8'));
+  manifest.host_permissions = ['http://127.0.0.1/*', 'http://localhost/*'];
+  await writeFile(join(extension, 'manifest.json'), JSON.stringify(manifest));
+  const statePath = join(temp, 'credentials.json');
+  const alpha = new Bridge({ persistent: true, statePath, port: 0, label: 'alpha' });
+  const beta = new Bridge({ persistent: true, statePath, port: 0, label: 'beta' });
+  let context;
+  t.after(async () => {
+    await context?.close();
+    await beta.stop();
+    await alpha.stop();
+    await new Promise((resolve) => server.close(resolve));
+    await rm(temp, { recursive: true, force: true });
+  });
+  await alpha.start();
+  beta.port = alpha.pairing.port;
+  await beta.start();
+  assert.equal(beta.mode, 'client');
+  context = await chromium.launchPersistentContext(join(temp, 'profile'), {
+    channel: 'chromium', headless: true,
+    args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
+  });
+  const worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker');
+  const id = new URL(worker.url()).host;
+  const pageA = await context.newPage();
+  await pageA.goto(`${base}/a`);
+  const pageB = await context.newPage();
+  await pageB.goto(`${base}/b`);
+  const popup = await context.newPage();
+  await popup.goto(`chrome-extension://${id}/popup.html`);
+  const ui = (message) => popup.evaluate((m) => chrome.runtime.sendMessage(m), message);
+  const ok = async (message) => {
+    const response = await ui(message);
+    assert.equal(response.error, undefined, JSON.stringify(response));
+    return response.result;
+  };
+  const paired = await ok({ type: 'pair', ...alpha.pairing });
+  assert.deepEqual(paired.sessions.map((session) => session.label).sort(), ['alpha', 'beta']);
+  const tabIdOf = (url) => worker.evaluate(async (u) => (await chrome.tabs.query({})).find((tab) => tab.url === u).id, url);
+  const tabA = await tabIdOf(`${base}/a`);
+  const tabB = await tabIdOf(`${base}/b`);
+
+  // With several sessions the popup must say which session gets the tab.
+  assert.match((await ui({ type: 'share', tabId: tabA })).error, /Choose which Pi session/);
+  await ok({ type: 'share', tabId: tabA, session: alpha.session });
+  const shared = await ok({ type: 'share', tabId: tabB, session: beta.session });
+  assert.deepEqual(shared.shareSessions, [{ tabId: tabA, session: alpha.session }, { tabId: tabB, session: beta.session }]);
+
+  // Both sessions work at the same time, and each sees only its own tabs.
+  const [alphaTabs, betaTabs] = await Promise.all([alpha.request('tabs'), beta.request('tabs')]);
+  assert.deepEqual(alphaTabs.map((tab) => tab.tabId), [tabA]);
+  assert.deepEqual(betaTabs.map((tab) => tab.tabId), [tabB]);
+  assert.match((await alpha.request('read', { tabId: tabA })).title, /Page \/a/);
+  assert.match((await beta.request('read', { tabId: tabB })).title, /Page \/b/);
+  await assert.rejects(beta.request('read', { tabId: tabA }), /another Pi session/);
+  await assert.rejects(alpha.request('candidates', { tabId: tabB, goal: 'Home' }), /another Pi session/);
+
+  // A tab a session opens belongs to that session, even on an allowlisted site.
+  await ok({ type: 'policy_add', origin: base, actions: ['read', 'navigate'] });
+  const opened = await beta.request('open', { url: `${base}/c` });
+  assert.ok((await beta.request('tabs')).some((tab) => tab.tabId === opened.tabId));
+  assert.ok(!(await alpha.request('tabs')).some((tab) => tab.tabId === opened.tabId || tab.tabId === tabB));
+  await assert.rejects(alpha.request('read', { tabId: opened.tabId }), /another Pi session/);
+
+  // The popup offers a session picker only when there is a choice to make.
+  await popup.reload();
+  await popup.waitForFunction(() => document.getElementById('session').options.length === 2);
+  assert.equal(await popup.locator('#session').isVisible(), true);
+
+  // When a session ends, Chrome drops its shares; the other session keeps working.
+  await beta.stop();
+  await popup.waitForFunction(() => chrome.runtime.sendMessage({ type: 'status' })
+    .then((state) => state.result.sessions.length === 1), null, { timeout: 5000 });
+  const after = await ok({ type: 'status' });
+  assert.deepEqual(after.shareSessions, [{ tabId: tabA, session: alpha.session }]);
+  assert.equal(await worker.evaluate((tabId) => chrome.action.getBadgeText({ tabId }), tabB), '');
+  assert.match((await alpha.request('read', { tabId: tabA })).title, /Page \/a/);
+  await popup.reload();
+  await popup.waitForFunction(() => document.getElementById('status').textContent.includes('1 session(s)'));
+  assert.equal(await popup.locator('#session').isVisible(), false);
 });
