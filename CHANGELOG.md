@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/matt-riley/pi-browser/compare/pi-browser-v1.0.0...pi-browser-v1.1.0) (2026-11-25)
+
+
+### Features
+
+* report honest follow_link effects ([#17](https://github.com/matt-riley/pi-browser/issues/17)) ([a7a7617](https://github.com/matt-riley/pi-browser/commit/a7a7617b0bed8bb28dec5e9abd01a058716c2f9d))
+
 ## [1.0.0](https://github.com/matt-riley/pi-browser/compare/pi-browser-v0.1.0...pi-browser-v1.0.0) (2026-11-19)
 
 
