@@ -66,7 +66,7 @@ For persistent Pi loading, optionally run `pi install /absolute/path/to/pi-brows
 | `browser_query({ tabId, question, claim?, detail?, snapshotId?, cursor? })` | Compact finding or claim verdict by default; full excerpts only with `detail: "evidence"` |
 | `browser_follow_link({ tabId, goal })` | Jev chooses an eligible same-origin link, then asks you before clicking it |
 
-Selection returns `selected`, `uncertain`, or `no_match`. Link actions also return `denied` or `clicked`. Inspect `result.page` after a click; `result.observationError` means the click occurred but a fresh page could not be observed. A new snapshot is an observation, **not proof that the overall goal succeeded**.
+Selection returns `selected`, `uncertain`, or `no_match`. Link actions also return `denied` or `clicked`. After a click, `effect` is `confirmed`, `unverifiable`, `suspected_noop` or `refused`, with a `hint` of `read again` or `needs approval`. `confirmed` means the URL or visible DOM (title, and text when the before-snapshot includes it) changed; it is **not proof that the overall goal succeeded**. Unchanged truncated text, or a missing after-snapshot (`result.observationError`), is `unverifiable`. A denied click is `refused`.
 
 ### Targeted evidence
 

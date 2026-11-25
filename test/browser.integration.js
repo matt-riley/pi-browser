@@ -251,7 +251,10 @@ test('MV3 bridge → shared tabs → DOM → Jev selection → approved click, w
     confirm: async ({ href }) => { assert.equal(href, `${base}/deployments`); return true; },
   });
   assert.equal(navigated.status, 'clicked');
+  assert.equal(navigated.effect, 'confirmed');
+  assert.equal(navigated.hint, 'read again');
   assert.match(navigated.result.page.text, /Deployment logs/);
+  assert.equal(navigated.result.page.url, `${base}/deployments`);
   assert.equal(target.url(), `${base}/deployments`);
   // A same-site click keeps the tab shared: Chrome keeps activeTab within the site.
   assert.match((await bridge.request('read', { tabId })).title, /Deployments/);

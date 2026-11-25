@@ -27,7 +27,76 @@ test('requires approval and then clicks the exact snapshot candidate once', asyn
     return true;
   } });
   assert.equal(result.status, 'clicked');
+  assert.equal(result.effect, 'confirmed');
+  assert.equal(result.hint, 'read again');
+  assert.equal(result.result.page.url, page.links[0].href);
+  assert.equal(result.result.page.title, 'Deployments');
   assert.deepEqual(calls[1], { op: 'click', args: { tabId: 1, snapshotId: 's1', candidateId: 'e1', approved: true } });
+});
+test('reports suspected_noop when the URL and title did not change', async () => {
+  const { browser, bridge } = fixture();
+  const request = bridge.request;
+  bridge.request = async (op, args) => {
+    const value = await request(op, args);
+    if (op === 'click') {
+      return { action: 'clicked', page: { snapshotId: 's2', url: page.url, title: page.title, text: 'Welcome', textTruncated: false } };
+    }
+    return value;
+  };
+  const result = await browser.followLink(1, 'Open deployments', { confirm: async () => true });
+  assert.equal(result.status, 'clicked');
+  assert.equal(result.effect, 'suspected_noop');
+  assert.equal(result.hint, 'read again');
+});
+test('reports unverifiable when the click cannot be observed, without throwing', async () => {
+  const { browser, bridge } = fixture();
+  const request = bridge.request;
+  bridge.request = async (op, args) => {
+    const value = await request(op, args);
+    if (op === 'click') return { action: 'clicked', observationError: 'Page still loading; read it again later' };
+    return value;
+  };
+  const result = await browser.followLink(1, 'Open deployments', { confirm: async () => true });
+  assert.equal(result.status, 'clicked');
+  assert.equal(result.effect, 'unverifiable');
+  assert.equal(result.hint, 'read again');
+  assert.equal(result.result.observationError, 'Page still loading; read it again later');
+  assert.equal(result.result.page, undefined);
+});
+test('reports refused with a needs-approval hint when the user denies the click', async () => {
+  const { browser, calls } = fixture();
+  const result = await browser.followLink(1, 'Open deployments', { confirm: async () => false });
+  assert.equal(result.status, 'denied');
+  assert.equal(result.effect, 'refused');
+  assert.equal(result.hint, 'needs approval');
+  assert.equal(calls.filter((c) => c.op === 'click').length, 0);
+});
+test('confirms a title-only change and stays unverifiable when truncated text cannot prove a no-op', async () => {
+  const { browser, bridge } = fixture();
+  const request = bridge.request;
+  bridge.request = async (op, args) => {
+    const value = await request(op, args);
+    if (op === 'candidates') return { ...value, text: 'Welcome', textTruncated: false };
+    if (op === 'click') {
+      return { action: 'clicked', page: { snapshotId: 's2', url: page.url, title: 'Updated', text: 'Welcome', textTruncated: false } };
+    }
+    return value;
+  };
+  const titled = await browser.followLink(1, 'Open deployments', { confirm: async () => true });
+  assert.equal(titled.effect, 'confirmed');
+  assert.equal(titled.hint, 'read again');
+
+  bridge.request = async (op, args) => {
+    const value = await request(op, args);
+    if (op === 'candidates') return { ...value, text: 'Welcome', textTruncated: true };
+    if (op === 'click') {
+      return { action: 'clicked', page: { snapshotId: 's2', url: page.url, title: page.title, text: 'Welcome', textTruncated: true } };
+    }
+    return value;
+  };
+  const truncated = await browser.followLink(1, 'Open deployments', { confirm: async () => true });
+  assert.equal(truncated.effect, 'unverifiable');
+  assert.equal(truncated.hint, 'read again');
 });
 test('every click asks, even if the browser says a site allows clicks without asking', async () => {
   const { browser, bridge, calls } = fixture();
