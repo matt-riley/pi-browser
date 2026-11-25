@@ -90,7 +90,7 @@ export default function (pi) {
   });
   pi.registerTool({
     name: 'browser_follow_link', label: 'Follow browser link',
-    description: 'Let Jev pick an eligible same-origin link for a goal, then click it only after the user approves; every click asks the user. Click once; if it fails, read again rather than retrying. No forms or buttons.',
+    description: 'Let Jev pick an eligible same-origin link for a goal, then click it only after the user approves; every click asks the user. Reports effect as confirmed, unverifiable, suspected_noop or refused, with a recovery hint; a new page is not proof the goal succeeded. Click once; if it fails, read again rather than retrying. No forms or buttons.',
     parameters: Type.Object({ tabId: tab, goal }), outputSchema: objectOutput,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     async execute(_id, params, signal, _update, ctx) {

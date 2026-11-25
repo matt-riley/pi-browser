@@ -29,6 +29,23 @@ function validateSummary(page) {
   return page;
 }
 
+// Compare the candidates snapshot with the post-click summary. Fail closed:
+// only a seen change is confirmed, and a truncated unchanged text is unverifiable.
+export function clickEffect(before, after, observationError) {
+  if (observationError || after == null ||
+      typeof after.url !== 'string' || typeof after.title !== 'string') {
+    return { effect: 'unverifiable', hint: 'read again' };
+  }
+  const textComparable = typeof before.text === 'string' && typeof after.text === 'string';
+  const changed = before.url !== after.url || before.title !== after.title ||
+    (textComparable && before.text !== after.text);
+  if (changed) return { effect: 'confirmed', hint: 'read again' };
+  if (textComparable && (before.textTruncated || after.textTruncated)) {
+    return { effect: 'unverifiable', hint: 'read again' };
+  }
+  return { effect: 'suspected_noop', hint: 'read again' };
+}
+
 export class Browser {
   queues = new Map();
   evidenceCache = new Map();
@@ -164,12 +181,14 @@ export class Browser {
       signal?.throwIfAborted();
       const approved = await confirm({ tabId, url: page.url, label: target.label, href: target.href });
       signal?.throwIfAborted();
-      if (!approved) return { ...decision, status: 'denied' };
+      if (!approved) return { ...decision, status: 'denied', effect: 'refused', hint: 'needs approval' };
       const result = await this.bridge.request('click', {
         tabId, snapshotId: page.snapshotId, candidateId: target.id, approved: true,
       }, { signal });
       // Never retry a click. Even a failed response may follow a successful action.
-      return { ...decision, status: 'clicked', result: { ...result, page: validateSummary(result.page) } };
+      const reported = clickEffect(page, result.page, result.observationError);
+      const observed = result.page === undefined ? result : { ...result, page: validateSummary(result.page) };
+      return { ...decision, status: 'clicked', ...reported, result: observed };
     });
   }
 }
